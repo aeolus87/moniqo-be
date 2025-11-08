@@ -1,0 +1,314 @@
+# Cursor Rules Content for Moniqo Backend
+
+**This file contains the exact content to be placed in `.cursorrules`**
+
+Copy everything below the divider into your workspace `.cursorrules` file.
+
+---
+
+```markdown
+# Moniqo Backend - AI Trading Platform Rules
+
+**Source of Truth:** `docs/project.md` contains comprehensive implementation details.
+
+## 1. Test-Driven Development (MANDATORY)
+
+### Workflow - NEVER DEVIATE
+1. Write tests FIRST (positive, negative, edge cases)
+2. Then implement feature
+3. Run tests continuously
+
+```python
+# Test naming pattern
+async def test_create_user_with_valid_data_returns_201()
+async def test_create_user_with_duplicate_email_returns_400()
+
+# Use pytest-asyncio for FastAPI testing
+@pytest.fixture
+async def test_client() -> AsyncClient
+```
+
+## 2. FastAPI Patterns
+
+### Background Tasks
+Use FastAPI's built-in BackgroundTasks (not Celery):
+```python
+from fastapi import BackgroundTasks
+
+@router.post("/register")
+async def register_user(user_data: UserCreate, background_tasks: BackgroundTasks):
+    user = await create_user(user_data)
+    background_tasks.add_task(send_welcome_email, user.email, user.first_name)
+    return response
+```
+
+### Dependencies
+```python
+# app/core/dependencies.py
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User
+
+async def require_permission(resource: str, action: str):
+    """Check user has permission {resource}:{action}"""
+```
+
+## 3. MongoDB/Motor Patterns
+
+### Soft Delete (MANDATORY)
+ALL collections must support soft deletes:
+```python
+# ALWAYS check is_deleted
+user = await db.users.find_one({"_id": user_id, "is_deleted": False})
+
+# Soft delete - don't hard delete
+await db.users.update_one({"_id": user_id}, {"$set": {"is_deleted": True}})
+```
+
+### Collection Structure
+```python
+{
+    "_id": ObjectId,
+    # ... fields ...
+    "created_at": datetime,
+    "updated_at": datetime,
+    "is_deleted": bool
+}
+```
+
+## 4. Authentication & Authorization
+
+### JWT
+- Access Token: 30 min
+- Refresh Token: 7 days
+- Algorithm: HS256
+- Secret: JWT_SECRET_KEY (env)
+
+### RBAC
+- Users → Roles → Permissions
+- Permission format: `{resource}:{action}` (e.g., `users:read`)
+- Use: `@router.get("/", dependencies=[Depends(require_permission("users", "read"))])`
+
+## 5. API Standards (MANDATORY)
+
+### Response Format
+ALL endpoints must return:
+```json
+{
+    "status_code": 201,
+    "message": "User created successfully",
+    "data": {...},
+    "error": null
+}
+```
+
+Error format:
+```json
+{
+    "status_code": 400,
+    "message": "Validation failed",
+    "data": null,
+    "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "Email already exists"
+    }
+}
+```
+
+### Pagination
+Request: `?limit=10&offset=0`
+Response: `{items: [...], total: 150, limit: 10, offset: 0, has_more: true}`
+
+### Rate Limiting
+- Users: 100 requests/minute
+- Admins: Unlimited (if ADMIN_RATE_LIMIT_ENABLED=False)
+- Redis-based: `rate_limit:{user_id}:{minute}`
+
+### Caching
+- Redis with 1-day TTL
+- Key: `{module}:{operation}:{params_hash}`
+- Invalidate on CREATE/UPDATE/DELETE
+
+## 6. Module Organization
+
+Feature-based structure:
+```
+app/modules/{module}/
+├── models.py           # MongoDB models
+├── schemas.py          # Pydantic DTOs
+├── service.py          # Business logic
+├── router.py           # API endpoints
+└── dependencies.py     # Module dependencies
+```
+
+### Modules
+**Phase 1:** auth, users, roles, permissions, plans, user_plans, notifications
+**Phase 2:** wallets, agents, prompts, user_wallets, user_settings, user_trades, user_flows, user_prompts
+
+## 7. Code Quality (MANDATORY)
+
+### Type Hints
+```python
+# ✅ CORRECT
+async def create_user(user_data: UserCreate, db: AsyncIOMotorDatabase) -> User:
+
+# ❌ WRONG
+async def create_user(user_data, db):
+```
+
+### Docstrings (Google Style)
+```python
+async def create_user(user_data: UserCreate) -> User:
+    """
+    Creates a new user in the database.
+    
+    Args:
+        user_data: User creation data (validated)
+        
+    Returns:
+        User: Newly created user object
+        
+    Raises:
+        DuplicateEmailError: If email already exists
+    """
+```
+
+### Atomic Functions
+Each function does ONE thing:
+```python
+# ✅ CORRECT
+async def hash_password(password: str) -> str
+async def verify_password(plain: str, hashed: str) -> bool
+
+# ❌ WRONG - multiple responsibilities
+async def handle_password(password: str, action: str, hashed: str = None)
+```
+
+### Logging
+```python
+# ✅ CORRECT - with context
+logger.info(f"User created: user_id={user.id}, email={user.email}")
+
+# ❌ WRONG - no context
+logger.info("User created")
+```
+
+NEVER log: passwords, tokens, API keys, sensitive data
+
+## 8. Environment Variables (MANDATORY)
+
+### Policy
+- NEVER hardcode ANY configuration
+- ALL values from environment variables
+- `.env.example` with placeholders (commit)
+- `.env` with actual values (NEVER commit)
+
+```python
+# ✅ CORRECT
+import os
+API_KEY = os.getenv("EXCHANGE_API_KEY")
+MAX_SIZE = float(os.getenv("MAX_POSITION_SIZE", "10000"))
+
+# ❌ WRONG
+API_KEY = "abc123xyz"
+MAX_SIZE = 10000
+```
+
+## 9. Initialization Scripts
+
+### Required Scripts
+**scripts/init_superadmin.py** - Create superadmin on startup
+**scripts/init_default_data.py** - Create default roles/permissions/plans
+
+### Startup Integration
+```python
+# app/main.py
+@app.on_event("startup")
+async def startup_event():
+    await init_superadmin()
+    await init_default_data()
+```
+
+## 10. Critical Reminders
+
+### NEVER DO
+❌ Write implementation before tests
+❌ Hard delete records (use soft delete)
+❌ Hardcode configuration values
+❌ Skip type hints or docstrings
+❌ Log sensitive data
+❌ Use generic exceptions
+❌ Skip permission checks
+
+### ALWAYS DO
+✅ Write tests FIRST (TDD)
+✅ Use standardized response format
+✅ Check is_deleted=False in queries
+✅ Use environment variables
+✅ Add type hints and docstrings
+✅ Log with context
+✅ Handle errors gracefully
+✅ Use async patterns (Motor)
+
+## Project Context
+
+### Directories
+- **Moniqo_BE/** - Active development (all work here)
+- **Moniqo_BE_FORK/** - Reference only (NEVER modify)
+
+### Technology Stack
+- Framework: FastAPI 0.104.1
+- Database: MongoDB with Motor (async)
+- Cache/Queue: Redis
+- Auth: JWT (python-jose)
+- Storage: AWS S3
+- Email: Resend
+- Testing: pytest + pytest-asyncio + httpx
+
+### Development Approach
+This is scaffold development - building from ground up with comprehensive documentation. Every feature must be:
+- Fully documented (docstrings, comments)
+- Thoroughly tested (80%+ coverage)
+- Following patterns in project.md
+
+## API Versioning
+All endpoints: `/api/v1/{resource}`
+
+## Success Criteria
+Before considering Phase 1 complete:
+- [ ] All tests pass (80%+ coverage)
+- [ ] TDD workflow followed for all features
+- [ ] Standardized responses everywhere
+- [ ] RBAC working (roles, permissions)
+- [ ] Soft delete implemented everywhere
+- [ ] Pagination on all list endpoints
+- [ ] Caching and rate limiting active
+- [ ] Background tasks working
+- [ ] Initialization scripts functional
+
+## References
+- **Detailed Guide:** `docs/project.md`
+- **Updated Rules:** `docs/workspace-rules-updated.md`
+- **Comparison:** `docs/rules-comparison.md`
+
+---
+
+**Remember:** `docs/project.md` is the absolute source of truth. When in doubt, reference that document for detailed implementation patterns, database schemas, and architectural decisions.
+```
+
+---
+
+## How to Apply
+
+1. **Backup current `.cursorrules`** (if it exists)
+2. **Copy the content above** (between the markdown code blocks)
+3. **Replace or append** to your workspace `.cursorrules` file
+4. **Reload VS Code/Cursor** to apply the changes
+5. **Verify** by asking the AI about TDD workflow or API standards
+
+## Validation
+
+After applying, test with these questions to the AI:
+- "What's the mandatory workflow for new features?" (Should mention TDD)
+- "How should API responses be formatted?" (Should show the standard format)
+- "How do I implement background tasks?" (Should mention FastAPI BackgroundTasks)
+- "What's the soft delete pattern?" (Should explain is_deleted flag)
+
