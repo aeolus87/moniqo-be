@@ -4,9 +4,11 @@ MongoDB database connection using Motor (async driver).
 Provides database instance and connection management with lifespan events.
 """
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from app.config.settings import settings
 import logging
+
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
+from app.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,23 +30,34 @@ async def connect_to_mongodb() -> None:
     global _client, _database
     
     try:
-        logger.info(f"Connecting to MongoDB at {settings.MONGODB_URL}")
+        current_settings = get_settings()
+
+        if current_settings is None:
+            raise RuntimeError(
+                "Application settings could not be initialised. "
+                "Verify that your .env file exists and contains all required values."
+            )
+
+        logger.info("Connecting to MongoDB at %s", current_settings.MONGODB_URL)
         
         # Create MongoDB client
         _client = AsyncIOMotorClient(
-            settings.MONGODB_URL,
+            current_settings.MONGODB_URL,
             serverSelectionTimeoutMS=5000,  # 5 seconds timeout
             maxPoolSize=10,  # Maximum number of connections in the pool
             minPoolSize=1,   # Minimum number of connections in the pool
         )
         
         # Get database instance
-        _database = _client[settings.MONGODB_DB_NAME]
+        _database = _client[current_settings.MONGODB_DB_NAME]
         
         # Test the connection
         await _client.admin.command("ping")
         
-        logger.info(f"Successfully connected to MongoDB database: {settings.MONGODB_DB_NAME}")
+        logger.info(
+            "Successfully connected to MongoDB database: %s",
+            current_settings.MONGODB_DB_NAME,
+        )
         
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {str(e)}")

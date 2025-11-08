@@ -5,6 +5,7 @@ Loads configuration from environment variables with validation.
 """
 
 from typing import List
+from urllib.parse import urlparse
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -98,6 +99,40 @@ class Settings(BaseSettings):
         elif isinstance(v, list):
             return v
         return []
+    
+    @field_validator("REDIS_URL")
+    @classmethod
+    def validate_redis_url(cls, v: str) -> str:
+        """
+        Validate Redis URL has required components.
+        
+        Args:
+            v: Redis connection URL.
+        
+        Returns:
+            str: Original Redis URL if valid.
+        
+        Raises:
+            ValueError: If scheme is invalid or port is missing/non-numeric.
+        """
+        parsed = urlparse(v)
+
+        if parsed.scheme not in {"redis", "rediss"}:
+            raise ValueError("REDIS_URL must use redis:// or rediss:// scheme")
+
+        port = parsed.port
+
+        if port is None:
+            raise ValueError(
+                "REDIS_URL must include a numeric port, e.g. redis://:password@host:6379/0"
+            )
+
+        if parsed.path and parsed.path != "/" and not parsed.path.lstrip("/").isdigit():
+            raise ValueError(
+                "REDIS_URL database index must be numeric, e.g. redis://:password@host:6379/0"
+            )
+
+        return v
     
     @field_validator("MAX_AVATAR_SIZE_MB")
     @classmethod
