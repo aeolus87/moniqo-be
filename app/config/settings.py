@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     
     # File Upload Limits
     MAX_AVATAR_SIZE_MB: int = Field(default=5)
-    ALLOWED_AVATAR_TYPES: List[str] = Field(default=["image/jpeg", "image/png", "image/gif"])
+    ALLOWED_AVATAR_TYPES: str = Field(default="image/jpeg,image/png,image/gif")
     
     # Resend Email
     RESEND_API_KEY: str = Field(..., description="Resend API key")
@@ -78,27 +78,37 @@ class Settings(BaseSettings):
     LOG_FILE_PATH: str = Field(default="logs/app.log")
     
     # CORS
-    CORS_ORIGINS: List[str] = Field(default=["http://localhost:3000", "http://localhost:5173"])
+    CORS_ORIGINS: str = Field(default="http://localhost:3000,http://localhost:5173")
     
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v) -> List[str]:
-        """Parse CORS origins from comma-separated string or list."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        elif isinstance(v, list):
-            return v
-        return []
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Get CORS origins as a list."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
     
-    @field_validator("ALLOWED_AVATAR_TYPES", mode="before")
-    @classmethod
-    def parse_allowed_avatar_types(cls, v) -> List[str]:
-        """Parse allowed avatar types from comma-separated string or list."""
-        if isinstance(v, str):
-            return [mime_type.strip() for mime_type in v.split(",")]
-        elif isinstance(v, list):
-            return v
-        return []
+    @property
+    def allowed_avatar_types_list(self) -> List[str]:
+        """Get allowed avatar types as a list."""
+        return [mime_type.strip() for mime_type in self.ALLOWED_AVATAR_TYPES.split(",")]
+    
+    # @field_validator("CORS_ORIGINS", mode="before")
+    # @classmethod
+    # def parse_cors_origins(cls, v) -> List[str]:
+    #     """Parse CORS origins from comma-separated string or list."""
+    #     if isinstance(v, str):
+    #         return [origin.strip() for origin in v.split(",")]
+    #     elif isinstance(v, list):
+    #         return v
+    #     return []
+    
+    # @field_validator("ALLOWED_AVATAR_TYPES", mode="before")
+    # @classmethod
+    # def parse_allowed_avatar_types(cls, v) -> List[str]:
+    #     """Parse allowed avatar types from comma-separated string or list."""
+    #     if isinstance(v, str):
+    #         return [mime_type.strip() for mime_type in v.split(",")]
+    #     elif isinstance(v, list):
+    #         return v
+    #     return []
     
     @field_validator("REDIS_URL")
     @classmethod
