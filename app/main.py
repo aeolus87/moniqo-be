@@ -4,6 +4,14 @@ FastAPI main application.
 Entry point for the AI Agent Trading Platform backend.
 """
 
+import warnings
+
+# Suppress deprecation warnings from third-party libraries
+# passlib uses deprecated 'crypt' module until it updates for Python 3.13
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="passlib")
+# Pydantic V2 migration warnings from dependencies
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*class-based.*config.*")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi

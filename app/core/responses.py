@@ -5,7 +5,7 @@ All API responses follow a consistent format for success and error cases.
 """
 
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ErrorDetail(BaseModel):
@@ -37,9 +37,8 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = Field(default=None, description="Response data")
     error: Optional[ErrorDetail] = Field(default=None, description="Error details")
     
-    class Config:
-        """Pydantic configuration."""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "status_code": 200,
                 "message": "Operation successful",
@@ -47,6 +46,7 @@ class StandardResponse(BaseModel):
                 "error": None
             }
         }
+    )
 
 
 def success_response(
@@ -142,9 +142,8 @@ class PaginatedResponse(BaseModel):
     offset: int = Field(..., description="Current offset")
     has_more: bool = Field(..., description="Whether there are more items")
     
-    class Config:
-        """Pydantic configuration."""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "items": [{"id": "1", "name": "Item 1"}],
                 "total": 150,
@@ -153,6 +152,7 @@ class PaginatedResponse(BaseModel):
                 "has_more": True
             }
         }
+    )
 
 
 def paginated_response(

@@ -4,6 +4,12 @@ Pytest configuration and shared fixtures.
 Provides test fixtures for database, HTTP client, and test data.
 """
 
+import warnings
+
+# Suppress deprecation warnings from third-party libraries
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="passlib")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*class-based.*config.*")
+
 import pytest
 import asyncio
 from typing import AsyncGenerator, Generator
