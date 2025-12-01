@@ -12,11 +12,37 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*class-
 
 import pytest
 import asyncio
+import os
+from pathlib import Path
 from typing import AsyncGenerator, Generator
 from httpx import AsyncClient
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
+# Ensure we're in project root directory so .env is found
+# Pydantic Settings automatically searches current directory and parents for .env
+_project_root = Path(__file__).parent.parent
+_env_file = _project_root.joinpath(".env")
+
+if not _env_file.exists():
+    pytest.exit(
+        f".env file not found at {_env_file}\n"
+        f"Please create .env file based on env.example"
+    )
+
+# Change to project root (Pydantic Settings will find .env here)
+os.chdir(_project_root)
+
+# Now import settings - it will load from .env in project root
 from app.main import app
 from app.config.settings import settings
+
+# Verify settings loaded successfully
+if settings is None:
+    pytest.exit(
+        f"Failed to load settings from .env file.\n"
+        f"Please ensure .env file exists at {_env_file} with all required variables.\n"
+        f"See env.example for required variables."
+    )
 
 # Use the same database as configured (not a separate test database)
 # We'll clean up test data after each test instead
@@ -72,6 +98,9 @@ async def test_db() -> AsyncGenerator[AsyncIOMotorDatabase, None]:
         await db["plans"].delete_many({})
         await db["user_plans"].delete_many({})
         await db["notifications"].delete_many({})
+        await db["wallets"].delete_many({})
+        await db["credentials"].delete_many({})
+        await db["user_wallets"].delete_many({})
     except Exception as e:
         print(f"Warning: Could not clean up test data: {e}")
     
@@ -369,6 +398,8 @@ async def superuser_token(
             {"resource": "user_plans", "action": "write"},
             {"resource": "notifications", "action": "read"},
             {"resource": "notifications", "action": "write"},
+            {"resource": "wallets", "action": "read"},
+            {"resource": "wallets", "action": "write"},
         ]
         
         permission_ids = []
@@ -463,6 +494,8 @@ async def superuser_token(
                     {"resource": "user_plans", "action": "write"},
                     {"resource": "notifications", "action": "read"},
                     {"resource": "notifications", "action": "write"},
+                    {"resource": "wallets", "action": "read"},
+                    {"resource": "wallets", "action": "write"},
                 ]
                 
                 permission_ids = []

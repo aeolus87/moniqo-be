@@ -1,234 +1,165 @@
 """
-Redis caching utilities.
+Redis Cache Utilities
 
-Provides cache operations with TTL management and key pattern deletion.
+Simple Redis client wrapper for caching operations.
+
+Author: Moniqo Team
+Last Updated: 2025-11-22
 """
 
-import json
-import hashlib
-from typing import Any, Optional
-import redis.asyncio as aioredis
-from app.config.settings import settings
+import redis.asyncio as redis
+from typing import Optional
+from app.config.settings import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Global Redis client
-_redis_client: Optional[aioredis.Redis] = None
+# Global Redis client instance
+_redis_client: Optional[redis.Redis] = None
 
 
-async def get_redis_client() -> aioredis.Redis:
+async def get_redis_client() -> redis.Redis:
     """
-    Get or create Redis client.
+    Get or create Redis client instance.
     
     Returns:
-        aioredis.Redis: Redis client instance
+        Redis client
         
-    Raises:
-        RuntimeError: If Redis connection fails
+    Example:
+        redis_client = await get_redis_client()
+        await redis_client.set("key", "value")
+        value = await redis_client.get("key")
     """
     global _redis_client
     
     if _redis_client is None:
+        settings = get_settings()
+        
         try:
-            _redis_client = await aioredis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
+            _redis_client = redis.Redis(
+                host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                db=settings.REDIS_DB,
                 decode_responses=True,
-                max_connections=10
+                socket_connect_timeout=5,
+                socket_keepalive=True
             )
+            
             # Test connection
             await _redis_client.ping()
-            logger.info("Successfully connected to Redis")
+            
+            logger.info(f"Redis connected: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+        
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {str(e)}")
-            raise RuntimeError(f"Redis connection failed: {str(e)}")
+            raise
     
     return _redis_client
 
 
-async def close_redis_connection() -> None:
-    """
-    Close Redis connection.
-    
-    Called during application shutdown.
-    """
+async def close_redis_client():
+    """Close Redis client connection"""
     global _redis_client
     
     if _redis_client:
-        logger.info("Closing Redis connection")
         await _redis_client.close()
         _redis_client = None
         logger.info("Redis connection closed")
 
 
-def generate_cache_key(*args: Any, prefix: str = "") -> str:
+def generate_cache_key(prefix: str, *args, **kwargs) -> str:
     """
-    Generate cache key from arguments.
-    
-    Creates a consistent cache key by hashing arguments.
+    Generate a cache key from prefix and arguments.
     
     Args:
-        *args: Arguments to include in cache key
-        prefix: Prefix for the cache key (e.g., "users:list")
+        prefix: Key prefix
+        *args: Positional arguments to include in key
+        **kwargs: Keyword arguments to include in key
         
     Returns:
-        str: Generated cache key
+        Cache key string
         
     Example:
-        >>> generate_cache_key("users", "list", limit=10, offset=0, prefix="api")
-        "api:users:list:e3b0c44298fc1c"
+        generate_cache_key("user", 123, status="active")
+        # Returns: "user:123:status=active"
     """
-    # Convert args to string
-    args_str = ":".join(str(arg) for arg in args if arg)
+    parts = [prefix]
     
-    # Create hash of arguments for consistency
-    args_hash = hashlib.md5(args_str.encode()).hexdigest()[:14]
+    # Add positional args
+    for arg in args:
+        parts.append(str(arg))
     
-    # Combine prefix and hash
-    if prefix:
-        return f"{prefix}:{args_hash}"
-    return args_hash
+    # Add keyword args (sorted for consistency)
+    for key in sorted(kwargs.keys()):
+        parts.append(f"{key}={kwargs[key]}")
+    
+    return ":".join(parts)
 
 
-async def get_cache(key: str) -> Optional[Any]:
+async def get_cache(key: str, default=None):
     """
     Get value from cache.
     
     Args:
         key: Cache key
+        default: Default value if key not found
         
     Returns:
-        Any: Cached value (deserialized from JSON) or None if not found
-        
-    Example:
-        >>> await get_cache("users:list:limit=10&offset=0")
-        {"items": [...], "total": 150}
+        Cached value or default
     """
     try:
-        client = await get_redis_client()
-        value = await client.get(key)
-        
-        if value is None:
-            logger.debug(f"Cache miss: {key}")
-            return None
-        
-        logger.debug(f"Cache hit: {key}")
-        return json.loads(value)
-        
+        redis_client = await get_redis_client()
+        value = await redis_client.get(key)
+        return value if value is not None else default
     except Exception as e:
-        logger.error(f"Error getting cache key {key}: {str(e)}")
-        return None
+        logger.error(f"Failed to get cache key {key}: {str(e)}")
+        return default
 
 
-async def set_cache(
-    key: str,
-    value: Any,
-    ttl: Optional[int] = None
-) -> bool:
+async def set_cache(key: str, value: str, ttl: int = 3600):
     """
-    Set value in cache.
+    Set value in cache with TTL.
     
     Args:
         key: Cache key
-        value: Value to cache (will be serialized to JSON)
-        ttl: Time to live in seconds (default: REDIS_TTL_SECONDS from settings)
-        
-    Returns:
-        bool: True if successful, False otherwise
-        
-    Example:
-        >>> await set_cache("users:list:limit=10", {"items": [...], "total": 150})
-        True
+        value: Value to cache
+        ttl: Time to live in seconds (default: 1 hour)
     """
     try:
-        client = await get_redis_client()
-        
-        # Serialize value to JSON
-        serialized_value = json.dumps(value)
-        
-        # Use default TTL if not specified
-        if ttl is None:
-            ttl = settings.REDIS_TTL_SECONDS
-        
-        # Set with expiration
-        await client.setex(key, ttl, serialized_value)
-        
-        logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
-        return True
-        
+        redis_client = await get_redis_client()
+        await redis_client.set(key, value, ex=ttl)
     except Exception as e:
-        logger.error(f"Error setting cache key {key}: {str(e)}")
-        return False
+        logger.error(f"Failed to set cache key {key}: {str(e)}")
 
 
-async def delete_cache(key: str) -> bool:
+async def delete_cache(key: str):
     """
     Delete value from cache.
     
     Args:
         key: Cache key to delete
-        
-    Returns:
-        bool: True if successful, False otherwise
-        
-    Example:
-        >>> await delete_cache("users:list:limit=10")
-        True
     """
     try:
-        client = await get_redis_client()
-        deleted_count = await client.delete(key)
-        
-        if deleted_count > 0:
-            logger.debug(f"Cache deleted: {key}")
-            return True
-        
-        logger.debug(f"Cache key not found: {key}")
-        return False
-        
+        redis_client = await get_redis_client()
+        await redis_client.delete(key)
     except Exception as e:
-        logger.error(f"Error deleting cache key {key}: {str(e)}")
-        return False
+        logger.error(f"Failed to delete cache key {key}: {str(e)}")
 
 
-async def delete_cache_pattern(pattern: str) -> int:
+async def delete_cache_pattern(pattern: str):
     """
-    Delete all cache keys matching pattern.
-    
-    Useful for cache invalidation (e.g., "users:*" to clear all user caches).
+    Delete all keys matching a pattern.
     
     Args:
-        pattern: Key pattern (supports wildcards, e.g., "users:*")
-        
-    Returns:
-        int: Number of keys deleted
-        
-    Example:
-        >>> await delete_cache_pattern("users:*")
-        15  # Deleted 15 keys
+        pattern: Pattern to match (e.g., "user:*")
     """
     try:
-        client = await get_redis_client()
-        
-        # Find all keys matching pattern
-        keys = []
-        async for key in client.scan_iter(match=pattern, count=100):
-            keys.append(key)
-        
-        if not keys:
-            logger.debug(f"No cache keys found for pattern: {pattern}")
-            return 0
-        
-        # Delete all matching keys
-        deleted_count = await client.delete(*keys)
-        
-        logger.info(f"Cache pattern deleted: {pattern} ({deleted_count} keys)")
-        return deleted_count
-        
+        redis_client = await get_redis_client()
+        keys = await redis_client.keys(pattern)
+        if keys:
+            await redis_client.delete(*keys)
     except Exception as e:
-        logger.error(f"Error deleting cache pattern {pattern}: {str(e)}")
-        return 0
+        logger.error(f"Failed to delete cache pattern {pattern}: {str(e)}")
 
 
 async def cache_exists(key: str) -> bool:
@@ -239,136 +170,74 @@ async def cache_exists(key: str) -> bool:
         key: Cache key to check
         
     Returns:
-        bool: True if key exists, False otherwise
-        
-    Example:
-        >>> await cache_exists("users:list:limit=10")
-        True
+        True if key exists
     """
     try:
-        client = await get_redis_client()
-        exists = await client.exists(key)
-        return bool(exists)
-        
+        redis_client = await get_redis_client()
+        return await redis_client.exists(key) > 0
     except Exception as e:
-        logger.error(f"Error checking cache key {key}: {str(e)}")
+        logger.error(f"Failed to check cache key {key}: {str(e)}")
         return False
 
 
 async def get_cache_ttl(key: str) -> Optional[int]:
     """
-    Get remaining TTL for cache key.
+    Get remaining TTL for a cache key.
     
     Args:
         key: Cache key
         
     Returns:
-        int: Remaining TTL in seconds, or None if key doesn't exist
-        
-    Example:
-        >>> await get_cache_ttl("users:list:limit=10")
-        85000  # 85000 seconds remaining
+        TTL in seconds, or None if key doesn't exist or has no expiry
     """
     try:
-        client = await get_redis_client()
-        ttl = await client.ttl(key)
-        
-        if ttl < 0:
-            # -1 means no expiration, -2 means key doesn't exist
-            return None
-        
-        return ttl
-        
+        redis_client = await get_redis_client()
+        ttl = await redis_client.ttl(key)
+        return ttl if ttl > 0 else None
     except Exception as e:
-        logger.error(f"Error getting TTL for cache key {key}: {str(e)}")
+        logger.error(f"Failed to get TTL for key {key}: {str(e)}")
         return None
 
 
 class CacheManager:
     """
-    Cache manager for module-specific caching.
+    Simple cache manager for common caching patterns.
     
-    Provides a convenient interface for caching with module prefix.
-    
-    Attributes:
-        module: Module name (used as cache key prefix)
+    Usage:
+        cache = CacheManager(prefix="user")
+        await cache.set("123", {"name": "Alice"}, ttl=3600)
+        user = await cache.get("123")
     """
     
-    def __init__(self, module: str):
+    def __init__(self, prefix: str = ""):
         """
-        Initialize CacheManager.
+        Initialize cache manager.
         
         Args:
-            module: Module name (e.g., "users", "roles")
+            prefix: Prefix for all cache keys
         """
-        self.module = module
+        self.prefix = prefix
     
-    def _get_key(self, operation: str, **kwargs) -> str:
-        """
-        Generate cache key for module operation.
-        
-        Args:
-            operation: Operation name (e.g., "list", "detail")
-            **kwargs: Additional parameters
-            
-        Returns:
-            str: Cache key
-        """
-        # Create params string
-        params = "&".join(f"{k}={v}" for k, v in sorted(kwargs.items()))
-        return f"{self.module}:{operation}:{params}" if params else f"{self.module}:{operation}"
+    def _make_key(self, key: str) -> str:
+        """Generate full cache key with prefix"""
+        return f"{self.prefix}:{key}" if self.prefix else key
     
-    async def get(self, operation: str, **kwargs) -> Optional[Any]:
-        """
-        Get cached value for operation.
-        
-        Args:
-            operation: Operation name
-            **kwargs: Operation parameters
-            
-        Returns:
-            Any: Cached value or None
-        """
-        key = self._get_key(operation, **kwargs)
-        return await get_cache(key)
+    async def get(self, key: str, default=None):
+        """Get value from cache"""
+        return await get_cache(self._make_key(key), default)
     
-    async def set(self, operation: str, value: Any, ttl: Optional[int] = None, **kwargs) -> bool:
-        """
-        Set cached value for operation.
-        
-        Args:
-            operation: Operation name
-            value: Value to cache
-            ttl: Time to live in seconds
-            **kwargs: Operation parameters
-            
-        Returns:
-            bool: True if successful
-        """
-        key = self._get_key(operation, **kwargs)
-        return await set_cache(key, value, ttl)
+    async def set(self, key: str, value: str, ttl: int = 3600):
+        """Set value in cache"""
+        await set_cache(self._make_key(key), value, ttl)
     
-    async def delete(self, operation: str, **kwargs) -> bool:
-        """
-        Delete cached value for operation.
-        
-        Args:
-            operation: Operation name
-            **kwargs: Operation parameters
-            
-        Returns:
-            bool: True if successful
-        """
-        key = self._get_key(operation, **kwargs)
-        return await delete_cache(key)
+    async def delete(self, key: str):
+        """Delete value from cache"""
+        await delete_cache(self._make_key(key))
     
-    async def invalidate_all(self) -> int:
-        """
-        Invalidate all caches for this module.
-        
-        Returns:
-            int: Number of keys deleted
-        """
-        pattern = f"{self.module}:*"
-        return await delete_cache_pattern(pattern)
-
+    async def exists(self, key: str) -> bool:
+        """Check if key exists"""
+        return await cache_exists(self._make_key(key))
+    
+    async def ttl(self, key: str) -> Optional[int]:
+        """Get remaining TTL"""
+        return await get_cache_ttl(self._make_key(key))

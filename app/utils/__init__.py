@@ -20,7 +20,7 @@ from app.utils.validators import (
 )
 from app.utils.cache import (
     get_redis_client,
-    close_redis_connection,
+    close_redis_client,
     generate_cache_key,
     get_cache,
     set_cache,
@@ -28,7 +28,7 @@ from app.utils.cache import (
     delete_cache_pattern,
     cache_exists,
     get_cache_ttl,
-    CacheManager,
+    CacheManager
 )
 
 __all__ = [
@@ -53,7 +53,7 @@ __all__ = [
     "validate_non_negative_number",
     # Cache
     "get_redis_client",
-    "close_redis_connection",
+    "close_redis_client",
     "generate_cache_key",
     "get_cache",
     "set_cache",

@@ -163,3 +163,5 @@ GET    /api/transactions/{id}            # Transaction details
 **Phase 7 - Swarm Coordination**
 - See [phase-7-swarm.md](phase-7-swarm.md)
 
+
+

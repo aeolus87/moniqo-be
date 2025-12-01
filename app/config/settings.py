@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = Field(default="http://localhost:3000,http://localhost:5173")
     
+    # Credential Encryption
+    ENCRYPTION_KEY: str = Field(..., description="Fernet encryption key for credentials (base64 encoded)")
+    
     @property
     def cors_origins_list(self) -> List[str]:
         """Get CORS origins as a list."""

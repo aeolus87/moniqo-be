@@ -18,7 +18,7 @@ from fastapi.openapi.utils import get_openapi
 from contextlib import asynccontextmanager
 from app.config import settings
 from app.config.database import connect_to_mongodb, close_mongodb_connection
-from app.utils.cache import get_redis_client, close_redis_connection
+from app.utils.cache import get_redis_client, close_redis_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
         await close_mongodb_connection()
         
         # Close Redis connection
-        await close_redis_connection()
+        await close_redis_client()
         
         logger.info("Application shut down successfully")
     except Exception as e:
@@ -168,6 +168,7 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
+    redirect_slashes=False,  # Disable automatic redirects to prevent 307 errors
     contact={
         "name": "AI Agent Trading Platform Team",
         "email": "support@aiagenttrading.com",
@@ -198,6 +199,11 @@ from app.modules.roles.router import router as roles_router
 from app.modules.plans.router import router as plans_router
 from app.modules.user_plans.router import router as user_plans_router
 from app.modules.notifications.router import router as notifications_router
+from app.modules.wallets.router import router as wallets_router
+from app.modules.credentials.router import router as credentials_router
+from app.modules.user_wallets.router import router as user_wallets_router
+from app.modules.orders.router import router as orders_router
+from app.modules.positions.router import router as positions_router
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
@@ -206,6 +212,17 @@ app.include_router(roles_router, prefix="/api/v1")
 app.include_router(plans_router, prefix="/api/v1")
 app.include_router(user_plans_router, prefix="/api/v1")
 app.include_router(notifications_router, prefix="/api/v1")
+# Register routers in REVERSE order of specificity (most specific LAST)
+# FastAPI checks routers in REVERSE order of registration!
+# More specific prefixes must be registered LAST so they're checked FIRST
+# /api/v1/wallets matches user_wallets_router (register first - checked last)
+# /api/v1/wallets/definitions matches wallets_router (register second)
+# /api/v1/wallets/credentials matches credentials_router (register last - checked first)
+app.include_router(user_wallets_router, prefix="/api/v1")
+app.include_router(wallets_router, prefix="/api/v1")
+app.include_router(credentials_router, prefix="/api/v1")
+app.include_router(orders_router, prefix="/api/v1")
+app.include_router(positions_router, prefix="/api/v1")
 
 # TODO: Add middleware (Sprint 31-33)
 # TODO: Include more routers (Sprint 16, 18, 22, 24, 26)
@@ -290,6 +307,18 @@ def custom_openapi():
         {
             "name": "Notifications",
             "description": "User notification system for in-app messages. Supports different notification types (info, success, warning, error) with read/unread status tracking."
+        },
+        {
+            "name": "Wallets",
+            "description": "Platform wallet definitions management. Admin-controlled catalog of supported exchanges/wallets with dynamic credential requirements, features, and API configuration."
+        },
+        {
+            "name": "Credentials",
+            "description": "User wallet credentials management. Securely store and manage exchange API keys and secrets with encryption. Users can add, update, delete, and test their credentials."
+        },
+        {
+            "name": "User Wallets",
+            "description": "User wallet instances management. Create and manage wallet instances with user-defined risk limits and AI-managed trading parameters. Supports pause/resume functionality."
         }
     ]
     
