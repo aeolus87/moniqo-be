@@ -76,8 +76,7 @@ async def create_plan(
 @router.get(
     "",
     status_code=status.HTTP_200_OK,
-    response_description="Plans retrieved successfully",
-    dependencies=[Depends(require_permission("plans", "read"))]
+    response_description="Plans retrieved successfully"
 )
 async def list_plans(
     limit: int = Query(10, description="Number of items per page"),
@@ -88,7 +87,7 @@ async def list_plans(
     """
     List all plans with pagination.
     
-    Requires: plans:read permission
+    Requires: Authentication (any authenticated user can view plans for onboarding)
     """
     try:
         # Normalize pagination parameters

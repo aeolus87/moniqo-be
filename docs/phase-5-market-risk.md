@@ -1,6 +1,6 @@
 # Phase 5 - Market Data & Risk Services
 
-**Status:** ⏳ PENDING  
+**Status:** 🚧 PARTIAL (Market data done, sentiment & risk rules API missing)  
 **Duration:** 12 days  
 **Dependencies:** Phase 4 (Flow Orchestration)
 
@@ -13,6 +13,8 @@ Build market data and risk management infrastructure:
 - Technical indicator calculation
 - Risk rule enforcement
 - Market crash detection
+- Sentiment data integration (Reddit, Polymarket)
+- Signal aggregation from multiple sources
 
 ---
 
@@ -148,10 +150,13 @@ GET    /api/risk-rules/validate          # Validate decision
 
 ## ✅ Success Criteria
 
-- [ ] Market data cached
-- [ ] Indicators calculated
-- [ ] Risk checks working
-- [ ] Crash detection functional
+- [x] Market data cached ✅
+- [x] Indicators calculated ✅
+- [ ] Risk checks working ⚠️ (AI risk manager exists, rules API missing)
+- [ ] Crash detection functional ❌
+- [ ] **Reddit sentiment integration** ⚠️ (client exists, not integrated)
+- [ ] **Polymarket odds integration** ⚠️ (client exists, not integrated)
+- [ ] **Signal aggregator used in flows** ❌
 - [ ] All tests passing
 
 ---

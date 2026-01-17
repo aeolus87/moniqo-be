@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from pydantic import Field, validator
+from pydantic import Field, validator, ConfigDict
 from beanie import Document
 from bson import ObjectId
 
@@ -58,6 +58,8 @@ class TimeInForce(str, Enum):
 
 class OrderStatusHistory(Document):
     """Order status history entry"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     status: OrderStatus
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     reason: Optional[str] = None
@@ -69,6 +71,8 @@ class OrderStatusHistory(Document):
 
 class OrderFill(Document):
     """Order fill (partial execution)"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     fill_id: str
     amount: Decimal
     price: Decimal
@@ -172,6 +176,8 @@ class Order(Document):
     
     # Soft Delete
     deleted_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     class Settings:
         name = "orders"

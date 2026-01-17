@@ -13,6 +13,9 @@ Build multi-agent swarm system:
 - Voting and consensus
 - Learning from outcomes
 - Real-time UI streaming
+- Learning outcome recording (success, P&L, lessons)
+- Agent performance tracking
+- Parameter adjustment based on outcomes
 
 ---
 
@@ -163,11 +166,14 @@ POST   /api/learning/{user_node_id}/feedback       # Record outcome
 
 ## ✅ Success Criteria
 
-- [ ] Conversations logged
-- [ ] Voting works correctly
-- [ ] Consensus calculated
-- [ ] WebSocket streaming works
-- [ ] Learning data recorded
+- [ ] Conversations logged ❌
+- [ ] Voting works correctly ❌
+- [ ] Consensus calculated ❌
+- [ ] WebSocket streaming works ❌
+- [ ] **Learning data recorded** ❌
+- [ ] **Agent performance metrics updated** ❌
+- [ ] **Lessons learned stored** ❌
+- [ ] **Parameter adjustment based on outcomes** ❌
 - [ ] All tests passing
 
 ---

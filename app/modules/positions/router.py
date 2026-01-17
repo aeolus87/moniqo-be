@@ -14,7 +14,7 @@ from decimal import Decimal
 from bson import ObjectId
 
 from app.core.dependencies import get_current_user
-from app.core.database import get_database
+from app.config.database import get_database
 from app.modules.positions.models import Position, PositionStatus, PositionSide
 from app.modules.positions.schemas import (
     ClosePositionRequest,

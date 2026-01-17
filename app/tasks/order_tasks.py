@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any
 
 from app.tasks.celery_app import celery_app
-from app.core.database import get_database
+from app.config.database import get_database
 from app.services.order_monitor import get_order_monitor
 from app.services.position_tracker import get_position_tracker, PositionTrackerService
 from app.utils.logger import get_logger

@@ -181,7 +181,8 @@ Analyze the risk of this trading order request and decide if it should be approv
                 for p in positions
             )
             prompt += f"- Total Position Value: ${total_position_value}\n"
-            prompt += f"- Portfolio Utilization: {(float(total_position_value) / float(balance) * 100) if balance > 0 else 0:.1f}%\n"
+            utilization = (total_position_value / balance * 100) if balance > 0 else Decimal("0")
+            prompt += f"- Portfolio Utilization: {float(utilization):.1f}%\n"
         
         prompt += f"""
 **Risk Limits:**

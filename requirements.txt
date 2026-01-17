@@ -6,6 +6,7 @@ python-multipart==0.0.6
 # Database
 motor==3.3.2  # Async MongoDB driver
 pymongo==4.6.0
+beanie==1.23.6  # MongoDB ODM for Python
 
 # Authentication & Security
 python-jose[cryptography]==3.3.0  # JWT

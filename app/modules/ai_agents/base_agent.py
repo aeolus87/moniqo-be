@@ -91,6 +91,7 @@ class BaseAgent(ABC):
             api_key_env = {
                 "gemini": "GEMINI_API_KEY",
                 "groq": "GROQ_API_KEY",
+                "openrouter": "OPENROUTER_API_KEY",
                 "openai": "OPENAI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY",
                 "xai": "XAI_API_KEY"
@@ -184,7 +185,7 @@ class BaseAgent(ABC):
             model_info = self.model.get_model_info()
             self.cost_tracking["total_input_tokens"] += model_info["total_input_tokens"]
             self.cost_tracking["total_output_tokens"] += model_info["total_output_tokens"]
-            self.cost_tracking["total_cost_usd"] += model_info["total_cost_usd"]
+            self.cost_tracking["total_cost_usd"] += Decimal(str(model_info["total_cost_usd"]))
             
             self.status = AgentStatus.IDLE
             

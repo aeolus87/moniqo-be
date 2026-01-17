@@ -1,0 +1,281 @@
+---
+title: AI Agent Trading Behavior
+---
+
+## Overview
+
+This document explains how the AI trading agents are intended to work in the backend.
+It references the current code structure and highlights what is implemented vs. planned.
+
+## Current State
+
+### Agents and Prompts
+- Prompts are already defined in the backend:
+  - `backend/app/modules/ai_agents/market_analyst_agent.py`
+  - `backend/app/modules/ai_agents/risk_manager_agent.py`
+  - `backend/app/modules/ai_agents/executor_agent.py`
+  - `backend/app/modules/ai_agents/monitor_agent.py`
+- The base agent in `backend/app/modules/ai_agents/base_agent.py` handles provider selection and API keys.
+- The prompts are ready; each agent only needs a provider/model choice.
+
+### Market Inputs Used Today
+- OHLCV data and 24h ticker stats are fetched from Binance via:
+  - `GET /api/v1/market/ohlc/{symbol}`
+  - `GET /api/v1/market/ticker/{symbol}`
+- Technical indicators are calculated in backend:
+  - RSI, MACD, SMA, EMA, Bollinger Bands, ATR
+  - `GET /api/v1/market/indicators/{symbol}`
+
+### Execution Flow (Now)
+- Flow trigger calls `/api/v1/flows/{id}/trigger`
+- The backend runs:
+  1. Market data fetch
+  2. Indicator calculation
+  3. Market analyst agent
+  4. Risk manager agent
+  5. Final decision stored in execution
+
+## Planned Market Intelligence Sources (Not Implemented Yet)
+
+### Sources
+- **Reddit**: sentiment, trend discussions
+- **X (Twitter)**: breaking news, influencer sentiment
+- **Polymarket**: prediction market odds
+
+### Verification and Anti‑Spam Strategy (Planned)
+To avoid spam and low‑quality signals:
+- **Source validation**: only verified accounts, high‑karma Reddit users, and trusted subreddits.
+- **Rate limits**: cap new signals per source per time window.
+- **Duplicate detection**: hash URLs and text to avoid repeated posts.
+- **Confidence scoring**: weight by author credibility and engagement.
+- **Consensus checks**: require multiple sources before a strong signal.
+- **Spam filters**: block common promotional keywords and bot patterns.
+
+## Cooldown Rule (Planned)
+
+After a trade decision is made, the agent should wait a fixed cooldown period before the next trade:
+- **Cooldown**: 10 minutes fixed
+- **Purpose**: prevent rapid re‑entries and over‑trading
+- **Implementation idea**: store `last_trade_at` per flow or per agent and enforce in FlowService
+
+## Simulation Wallet
+
+For demo and testing:
+- Use a **$100 simulated balance**
+- No real funds required
+- The balance is used for position sizing and PnL display only
+
+## Where to Extend Next
+
+### 1. Source Ingestion Services
+
+Create dedicated clients for each external sentiment source:
+
+#### Reddit Client (`app/integrations/sentiment/reddit_client.py`)
+
+```python
+class RedditClient:
+    """Fetch sentiment from crypto subreddits."""
+    
+    TRUSTED_SUBREDDITS = [
+        "CryptoCurrency",
+        "Bitcoin",
+        "ethereum",
+        "solana",
+        "CryptoMarkets",
+    ]
+    
+    MIN_KARMA = 1000           # Author minimum karma
+    MIN_UPVOTES = 10           # Post minimum upvotes
+    MAX_AGE_HOURS = 24         # Only recent posts
+    
+    async def fetch_posts(self, symbol: str, limit: int = 20) -> list:
+        """
+        Fetch recent posts mentioning a symbol.
+        Filters: karma, upvotes, age, trusted subreddits.
+        """
+        pass
+    
+    async def analyze_sentiment(self, posts: list) -> dict:
+        """
+        Returns: { bullish: int, bearish: int, neutral: int, score: float }
+        """
+        pass
+```
+
+#### X/Twitter Client (`app/integrations/sentiment/x_client.py`)
+
+```python
+class XClient:
+    """Fetch sentiment from X (Twitter)."""
+    
+    VERIFIED_ONLY = True       # Require blue checkmark
+    MIN_FOLLOWERS = 5000       # Author min followers
+    MAX_AGE_MINUTES = 60       # Only recent tweets
+    
+    BLOCKLIST_KEYWORDS = [
+        "giveaway", "airdrop", "pump", "shill",
+        "100x", "guaranteed", "free money",
+    ]
+    
+    async def fetch_tweets(self, symbol: str, limit: int = 50) -> list:
+        """
+        Fetch recent tweets mentioning a symbol.
+        Filters: verified, followers, blocklist.
+        """
+        pass
+    
+    async def detect_spam(self, tweet: dict) -> bool:
+        """Check for promotional/spam patterns."""
+        pass
+```
+
+#### Polymarket Client (`app/integrations/sentiment/polymarket_client.py`)
+
+```python
+class PolymarketClient:
+    """Fetch prediction market odds."""
+    
+    async def get_market_odds(self, query: str) -> dict:
+        """
+        Returns: { question: str, yes_prob: float, no_prob: float, volume: float }
+        """
+        pass
+    
+    async def get_crypto_markets(self) -> list:
+        """List active crypto-related prediction markets."""
+        pass
+```
+
+### 2. Signal Aggregation and Scoring
+
+Create a scoring layer that normalizes signals:
+
+#### Sentiment Aggregator (`app/services/sentiment_aggregator.py`)
+
+```python
+class SentimentAggregator:
+    """Combine signals from multiple sources into a single score."""
+    
+    SOURCE_WEIGHTS = {
+        "reddit": 0.3,
+        "x": 0.4,
+        "polymarket": 0.3,
+    }
+    
+    async def aggregate(self, symbol: str) -> dict:
+        """
+        Fetch from all sources and compute weighted score.
+        
+        Returns:
+        {
+            "symbol": "BTC",
+            "score": 0.65,           # -1 to 1 (bearish to bullish)
+            "confidence": 0.8,       # 0 to 1
+            "sources": {
+                "reddit": { "score": 0.7, "posts": 15 },
+                "x": { "score": 0.6, "tweets": 42 },
+                "polymarket": { "score": 0.7, "markets": 3 },
+            },
+            "signals": [
+                { "source": "x", "text": "...", "sentiment": "bullish" },
+                ...
+            ],
+            "timestamp": "2026-01-17T15:00:00Z"
+        }
+        """
+        pass
+```
+
+### 3. Verification Pipeline
+
+Implement anti-spam and quality checks:
+
+```python
+class SignalVerifier:
+    """Verify and filter incoming signals."""
+    
+    # Duplicate detection
+    seen_hashes: set = set()
+    
+    def hash_signal(self, text: str, url: str) -> str:
+        """Create unique hash for deduplication."""
+        pass
+    
+    def is_duplicate(self, signal: dict) -> bool:
+        """Check if signal was already processed."""
+        pass
+    
+    def check_author_credibility(self, author: dict, source: str) -> float:
+        """
+        Score author credibility (0-1).
+        Reddit: karma, account age
+        X: followers, verified status
+        """
+        pass
+    
+    def detect_spam_keywords(self, text: str) -> bool:
+        """Check for promotional/scam keywords."""
+        pass
+    
+    def requires_consensus(self, signal: dict) -> bool:
+        """
+        Strong signals (buy/sell) require multiple sources.
+        Weak signals (hold) can pass with single source.
+        """
+        pass
+```
+
+### 4. Integration with AI Prompt
+
+Attach sentiment data to the market analyst prompt context:
+
+```python
+# In FlowService.execute_flow():
+
+# Fetch sentiment
+aggregator = SentimentAggregator()
+sentiment = await aggregator.aggregate(flow.symbol)
+
+# Add to AI context
+analysis_context = {
+    "symbol": flow.symbol,
+    "market_data": market_context,
+    "indicators": indicators,
+    "sentiment": {
+        "score": sentiment["score"],
+        "confidence": sentiment["confidence"],
+        "top_signals": sentiment["signals"][:5],
+    },
+}
+```
+
+### 5. Cooldown Enforcement
+
+Add cooldown check in `FlowService.execute_flow()`:
+
+```python
+COOLDOWN_MINUTES = 10
+
+async def execute_flow(db, flow, ...):
+    # Check cooldown
+    if flow.last_run_at:
+        elapsed = (datetime.now(timezone.utc) - flow.last_run_at).total_seconds()
+        if elapsed < COOLDOWN_MINUTES * 60:
+            remaining = COOLDOWN_MINUTES - (elapsed / 60)
+            raise CooldownError(f"Wait {remaining:.1f} minutes before next trade")
+    
+    # ... rest of execution
+```
+
+### 6. Implementation Priority
+
+| Priority | Task | Effort |
+|----------|------|--------|
+| 1 | Cooldown enforcement | Low |
+| 2 | Reddit client | Medium |
+| 3 | X client | Medium |
+| 4 | Signal aggregator | Medium |
+| 5 | Polymarket client | Low |
+| 6 | Verifier pipeline | Medium |
+

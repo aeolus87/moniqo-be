@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from pydantic import Field, validator
+from pydantic import Field, validator, ConfigDict
 from beanie import Document
 from bson import ObjectId
 
@@ -51,6 +51,8 @@ class EntryData(Document):
     ai_confidence: Optional[int] = None
     ai_agent: Optional[str] = None
     
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     class Settings:
         arbitrary_types_allowed = True
 
@@ -68,6 +70,8 @@ class CurrentData(Document):
     max_drawdown_percent: Decimal
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     class Settings:
         arbitrary_types_allowed = True
 
@@ -82,6 +86,8 @@ class RiskManagement(Document):
     take_profit_order_id: Optional[ObjectId] = None
     trailing_stop: Optional[Dict[str, Any]] = None
     break_even: Optional[Dict[str, Any]] = None
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     class Settings:
         arbitrary_types_allowed = True
@@ -100,6 +106,8 @@ class ExitData(Document):
     realized_pnl: Decimal
     realized_pnl_percent: Decimal
     time_held_minutes: int
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     class Settings:
         arbitrary_types_allowed = True
@@ -178,6 +186,8 @@ class Position(Document):
     
     # Soft Delete
     deleted_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     class Settings:
         name = "positions"
@@ -388,6 +398,8 @@ class PositionUpdate(Document):
     unrealized_pnl_percent: Decimal
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     actions_triggered: List[Dict[str, Any]] = Field(default_factory=list)
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     class Settings:
         name = "position_updates"

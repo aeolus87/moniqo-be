@@ -83,6 +83,34 @@ class Settings(BaseSettings):
     # Credential Encryption
     ENCRYPTION_KEY: str = Field(..., description="Fernet encryption key for credentials (base64 encoded)")
     
+    # AI Model API Keys
+    GROQ_API_KEY: str = Field(default="", description="Groq API key for LLM")
+    OPENROUTER_API_KEY: str = Field(default="", description="OpenRouter API key")
+    GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key")
+    
+    # Default AI Model Configuration  
+    AI_DEFAULT_PROVIDER: str = Field(default="groq", description="Default AI provider (groq, gemini, openrouter)")
+    AI_DEFAULT_MODEL: str = Field(default="llama-3.3-70b-versatile", description="Default AI model name")
+    
+    # Celery (for background tasks and scheduled flows)
+    CELERY_BROKER_URL: str = Field(default="", description="Celery broker URL (defaults to REDIS_URL)")
+    CELERY_RESULT_BACKEND: str = Field(default="", description="Celery result backend (defaults to REDIS_URL)")
+    
+    # Sentiment API Keys (optional, for signal aggregation)
+    TWITTER_BEARER_TOKEN: str = Field(default="", description="X/Twitter API Bearer Token")
+    REDDIT_CLIENT_ID: str = Field(default="", description="Reddit API Client ID")
+    REDDIT_CLIENT_SECRET: str = Field(default="", description="Reddit API Client Secret")
+    
+    @property
+    def celery_broker(self) -> str:
+        """Get Celery broker URL (fallback to Redis)."""
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+    
+    @property
+    def celery_backend(self) -> str:
+        """Get Celery result backend URL (fallback to Redis)."""
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
+    
     @property
     def cors_origins_list(self) -> List[str]:
         """Get CORS origins as a list."""

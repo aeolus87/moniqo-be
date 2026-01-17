@@ -12,6 +12,7 @@ from typing import Dict, Type, Optional, Any
 from app.integrations.ai.base import BaseLLM, ModelProvider
 from app.integrations.ai.gemini_model import GeminiModel
 from app.integrations.ai.groq_model import GroqModel
+from app.integrations.ai.openrouter_model import OpenRouterModel
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,6 +115,7 @@ class ModelFactory:
             defaults = {
                 "gemini": "gemini-1.5-pro",
                 "groq": "llama-3.3-70b-versatile",
+                "openrouter": "meta-llama/llama-3.1-8b-instruct:free",
                 "openai": "gpt-4-turbo-preview",
                 "anthropic": "claude-3-5-sonnet-20241022",
                 "xai": "grok-beta",
@@ -144,6 +146,7 @@ class ModelFactory:
         """Register default model implementations"""
         self.register("gemini", GeminiModel)
         self.register("groq", GroqModel)
+        self.register("openrouter", OpenRouterModel)
         
         # Future: Register other models
         # self.register("openai", OpenAIModel)

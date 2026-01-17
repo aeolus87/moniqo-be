@@ -36,10 +36,8 @@ async def get_redis_client() -> redis.Redis:
         settings = get_settings()
         
         try:
-            _redis_client = redis.Redis(
-                host=settings.REDIS_HOST,
-                port=settings.REDIS_PORT,
-                db=settings.REDIS_DB,
+            _redis_client = redis.from_url(
+                settings.REDIS_URL,
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_keepalive=True
@@ -48,7 +46,7 @@ async def get_redis_client() -> redis.Redis:
             # Test connection
             await _redis_client.ping()
             
-            logger.info(f"Redis connected: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+            logger.info(f"Redis connected: {settings.REDIS_URL}")
         
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {str(e)}")

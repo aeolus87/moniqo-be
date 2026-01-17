@@ -14,7 +14,7 @@ from decimal import Decimal
 from bson import ObjectId
 
 from app.core.dependencies import get_current_user
-from app.core.database import get_database
+from app.config.database import get_database
 from app.modules.orders.models import Order, OrderStatus, OrderSide, OrderType, TimeInForce
 from app.modules.orders.schemas import (
     CreateOrderRequest,

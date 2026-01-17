@@ -5,6 +5,10 @@ Entry point for the AI Agent Trading Platform backend.
 """
 
 import warnings
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Suppress deprecation warnings from third-party libraries
 # passlib uses deprecated 'crypt' module until it updates for Python 3.13
@@ -204,6 +208,9 @@ from app.modules.credentials.router import router as credentials_router
 from app.modules.user_wallets.router import router as user_wallets_router
 from app.modules.orders.router import router as orders_router
 from app.modules.positions.router import router as positions_router
+from app.modules.ai_agents.router import router as ai_agents_router
+from app.modules.market.router import router as market_router
+from app.modules.flows.router import router as flows_router
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
@@ -223,6 +230,9 @@ app.include_router(wallets_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(positions_router, prefix="/api/v1")
+app.include_router(ai_agents_router, prefix="/api/v1")
+app.include_router(market_router, prefix="/api/v1")
+app.include_router(flows_router, prefix="/api/v1")
 
 # TODO: Add middleware (Sprint 31-33)
 # TODO: Include more routers (Sprint 16, 18, 22, 24, 26)
@@ -319,6 +329,18 @@ def custom_openapi():
         {
             "name": "User Wallets",
             "description": "User wallet instances management. Create and manage wallet instances with user-defined risk limits and AI-managed trading parameters. Supports pause/resume functionality."
+        },
+        {
+            "name": "AI Agents",
+            "description": "AI-powered trading agents for market analysis, risk assessment, and trade execution. Uses Groq, OpenRouter, or Gemini models for intelligent decision-making."
+        },
+        {
+            "name": "Market Data",
+            "description": "Real-time and historical market data from Binance (OHLCV, tickers, prices) and Coinlore (global stats, top coins). FREE - No API keys required."
+        },
+        {
+            "name": "Flows",
+            "description": "Trading automation flows management. Create, configure, and trigger AI-powered trading flows with market analysis, risk validation, and execution."
         }
     ]
     

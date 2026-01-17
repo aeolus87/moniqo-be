@@ -26,12 +26,12 @@ settings = get_settings()
 # Initialize Celery
 celery_app = Celery(
     "moniqo",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    broker=settings.celery_broker,
+    backend=settings.celery_backend,
     include=[
         "app.tasks.wallet_tasks",
         "app.tasks.order_tasks",
-        # Future: Add more task modules
+        "app.tasks.flow_tasks",
     ]
 )
 
@@ -63,6 +63,7 @@ celery_app.conf.update(
         "app.tasks.wallet_tasks.*": {"queue": "wallets"},
         "app.tasks.order_tasks.*": {"queue": "orders"},
         "app.tasks.email_tasks.*": {"queue": "emails"},
+        "app.tasks.flow_tasks.*": {"queue": "flows"},
     },
     
     # Beat schedule (periodic tasks)
@@ -93,6 +94,13 @@ celery_app.conf.update(
             "task": "app.tasks.order_tasks.monitor_all_positions_task",
             "schedule": crontab(minute="*"),  # Every minute
             "options": {"queue": "orders"}
+        },
+        
+        # Trigger scheduled flows every minute (checks cron expressions)
+        "trigger-scheduled-flows": {
+            "task": "app.tasks.flow_tasks.trigger_scheduled_flows_task",
+            "schedule": crontab(minute="*"),  # Every minute
+            "options": {"queue": "flows"}
         },
     }
 )

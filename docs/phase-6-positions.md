@@ -1,6 +1,6 @@
 # Phase 6 - Position Management
 
-**Status:** ⏳ PENDING  
+**Status:** 🚧 PARTIAL (Models & services exist, not integrated into flow)  
 **Duration:** 10 days  
 **Dependencies:** Phase 5 (Market Data & Risk)
 
@@ -13,6 +13,10 @@ Build position tracking and monitoring system:
 - Real-time P&L tracking
 - AI-managed stops/take-profits
 - Position monitoring loops
+- Monitoring loop integration with flow execution
+- Sentiment fetching during monitoring (Reddit, Polymarket)
+- AI re-evaluation during monitoring
+- Automated position closing (stop-loss, take-profit, AI signal)
 
 ---
 
@@ -150,10 +154,15 @@ GET    /api/transactions/{id}            # Transaction details
 
 ## ✅ Success Criteria
 
-- [ ] Positions tracked in real-time
-- [ ] P&L calculated correctly
-- [ ] AI updates stops/TP
-- [ ] Monitoring loops work
+- [x] Positions tracked in real-time ✅
+- [x] P&L calculated correctly ✅
+- [ ] AI updates stops/TP ⚠️ (models exist, not integrated)
+- [x] Monitoring loops work ✅ (separate Celery tasks)
+- [ ] **Monitoring integrated into flow execution** ❌
+- [ ] **Sentiment fetched during monitoring** ❌
+- [ ] **AI re-evaluates positions every 30 seconds** ❌
+- [ ] **Automated position closing from AI decisions** ❌
+- [ ] **Position creation from flow execution** ❌
 - [ ] All tests passing
 
 ---
