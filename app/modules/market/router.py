@@ -25,8 +25,12 @@ from app.modules.market.schemas import (
     TopCoinsResponse,
     IndicatorsResponse,
     IndicatorValue,
+    MarketDataResponse,
+    MarketHealthResponse,
 )
 from app.services.indicators import calculate_all_indicators
+from app.services.market_health import compute_market_health
+from app.services.signal_aggregator import get_signal_aggregator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -71,6 +75,139 @@ async def get_ohlc(
     except Exception as e:
         logger.error(f"Failed to fetch OHLC for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {str(e)}")
+
+
+# ==================== MARKET DATA + HEALTH ====================
+
+@router.get(
+    "/market-data/{symbol:path}",
+    response_model=MarketDataResponse,
+    summary="Get combined market data",
+    description="Get candles, indicators, market health, and sentiment signal",
+)
+async def get_market_data(
+    symbol: str,
+    interval: str = Query("1h", description="Timeframe: 1m, 5m, 15m, 1h, 4h, 1d"),
+    limit: int = Query(100, ge=1, le=1000, description="Number of candles"),
+    include_signal: bool = Query(True, description="Include aggregated sentiment signal"),
+    crash_threshold: float = Query(10.0, description="Crash threshold percent"),
+):
+    """Get combined market data with indicators and health"""
+    client = get_binance_client()
+    aggregator = get_signal_aggregator()
+
+    try:
+        candles = await client.get_klines(symbol, interval, limit)
+        ticker = await client.get_24h_ticker(symbol)
+
+        if not candles or not ticker:
+            raise HTTPException(status_code=404, detail=f"Market data not found for {symbol}")
+
+        closes = [float(c.close) for c in candles]
+        highs = [float(c.high) for c in candles]
+        lows = [float(c.low) for c in candles]
+        indicators = calculate_all_indicators(closes, highs, lows)
+
+        health = compute_market_health(
+            closes=closes,
+            indicators=indicators,
+            ticker_change_percent=float(ticker.change_percent_24h),
+            crash_threshold=crash_threshold,
+        )
+
+        signal = None
+        if include_signal:
+            base_symbol = symbol.split("/")[0] if "/" in symbol else symbol
+            signal = (await aggregator.get_signal(base_symbol.upper())).to_dict()
+
+        return MarketDataResponse(
+            symbol=symbol,
+            interval=interval,
+            candles=[
+                CandleResponse(
+                    time=c.to_dict()["time"],
+                    open=c.to_dict()["open"],
+                    high=c.to_dict()["high"],
+                    low=c.to_dict()["low"],
+                    close=c.to_dict()["close"],
+                    volume=c.to_dict()["volume"],
+                )
+                for c in candles
+            ],
+            indicators={k: float(v) for k, v in indicators.items() if isinstance(v, (int, float))},
+            current=TickerResponse(
+                symbol=ticker.symbol,
+                price=float(ticker.price),
+                change24h=float(ticker.change_24h),
+                changePercent24h=float(ticker.change_percent_24h),
+                high24h=float(ticker.high_24h),
+                low24h=float(ticker.low_24h),
+                volume24h=float(ticker.volume_24h),
+            ),
+            health=MarketHealthResponse(
+                symbol=symbol,
+                volatility=health["volatility"],
+                trend=health["trend"],
+                strength=health["strength"],
+                crashDetected=health["crash_detected"],
+                crashThreshold=health["crash_threshold"],
+            ),
+            signal=signal,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch market data for {symbol}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {str(e)}")
+
+
+@router.get(
+    "/market-data/{symbol:path}/health",
+    response_model=MarketHealthResponse,
+    summary="Get market health",
+    description="Get market volatility, trend, and crash detection",
+)
+async def get_market_health(
+    symbol: str,
+    interval: str = Query("1h", description="Timeframe: 1m, 5m, 15m, 1h, 4h, 1d"),
+    limit: int = Query(100, ge=1, le=1000, description="Number of candles"),
+    crash_threshold: float = Query(10.0, description="Crash threshold percent"),
+):
+    """Get market health metrics"""
+    client = get_binance_client()
+
+    try:
+        candles = await client.get_klines(symbol, interval, limit)
+        ticker = await client.get_24h_ticker(symbol)
+
+        if not candles or not ticker:
+            raise HTTPException(status_code=404, detail=f"Market data not found for {symbol}")
+
+        closes = [float(c.close) for c in candles]
+        highs = [float(c.high) for c in candles]
+        lows = [float(c.low) for c in candles]
+        indicators = calculate_all_indicators(closes, highs, lows)
+
+        health = compute_market_health(
+            closes=closes,
+            indicators=indicators,
+            ticker_change_percent=float(ticker.change_percent_24h),
+            crash_threshold=crash_threshold,
+        )
+
+        return MarketHealthResponse(
+            symbol=symbol,
+            volatility=health["volatility"],
+            trend=health["trend"],
+            strength=health["strength"],
+            crashDetected=health["crash_detected"],
+            crashThreshold=health["crash_threshold"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch market health for {symbol}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch market health: {str(e)}")
 
 
 # ==================== TICKER STATS ====================

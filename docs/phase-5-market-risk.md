@@ -1,6 +1,6 @@
 # Phase 5 - Market Data & Risk Services
 
-**Status:** 🚧 PARTIAL (Market data done, sentiment & risk rules API missing)  
+**Status:** 🚧 PARTIAL (Market data done, health + risk rules validate wired)  
 **Duration:** 12 days  
 **Dependencies:** Phase 4 (Flow Orchestration)
 
@@ -152,11 +152,11 @@ GET    /api/risk-rules/validate          # Validate decision
 
 - [x] Market data cached ✅
 - [x] Indicators calculated ✅
-- [ ] Risk checks working ⚠️ (AI risk manager exists, rules API missing)
-- [ ] Crash detection functional ❌
-- [ ] **Reddit sentiment integration** ⚠️ (client exists, not integrated)
-- [ ] **Polymarket odds integration** ⚠️ (client exists, not integrated)
-- [ ] **Signal aggregator used in flows** ❌
+- [x] Risk checks working ⚠️ (AI risk manager + validate endpoint)
+- [x] Crash detection functional ✅
+- [x] **Reddit sentiment integration** ✅ (aggregator endpoint)
+- [x] **Polymarket odds integration** ✅ (aggregator endpoint)
+- [x] **Signal aggregator used in flows** ✅
 - [ ] All tests passing
 
 ---
@@ -165,6 +165,5 @@ GET    /api/risk-rules/validate          # Validate decision
 
 **Phase 6 - Position Management**
 - See [phase-6-positions.md](phase-6-positions.md)
-
 
 

@@ -156,13 +156,13 @@ GET    /api/transactions/{id}            # Transaction details
 
 - [x] Positions tracked in real-time ✅
 - [x] P&L calculated correctly ✅
-- [ ] AI updates stops/TP ⚠️ (models exist, not integrated)
+- [x] AI updates stops/TP ✅
 - [x] Monitoring loops work ✅ (separate Celery tasks)
-- [ ] **Monitoring integrated into flow execution** ❌
-- [ ] **Sentiment fetched during monitoring** ❌
-- [ ] **AI re-evaluates positions every 30 seconds** ❌
-- [ ] **Automated position closing from AI decisions** ❌
-- [ ] **Position creation from flow execution** ❌
+- [x] **Monitoring integrated into flow execution** ✅
+- [x] **Sentiment fetched during monitoring** ✅
+- [x] **AI re-evaluates positions every monitor loop** ✅
+- [x] **Automated position closing from AI decisions** ✅
+- [x] **Position creation from flow execution** ✅
 - [ ] All tests passing
 
 ---
@@ -171,6 +171,3 @@ GET    /api/transactions/{id}            # Transaction details
 
 **Phase 7 - Swarm Coordination**
 - See [phase-7-swarm.md](phase-7-swarm.md)
-
-
-

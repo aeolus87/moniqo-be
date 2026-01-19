@@ -1,6 +1,6 @@
 # Phase 7 - Swarm Coordination
 
-**Status:** ⏳ PENDING  
+**Status:** 🚧 IN PROGRESS  
 **Duration:** 14 days  
 **Dependencies:** Phase 5 (Market Data), Phase 6 (Positions)
 
@@ -141,7 +141,7 @@ Build multi-agent swarm system:
 
 ```
 GET    /api/conversations/{execution_id}           # Get conversation
-WS     /ws/conversations/{execution_id}            # Stream real-time
+WS     /api/v1/conversations/ws/{execution_id}     # Stream real-time
 
 GET    /api/conversations/{id}/voting              # Get voting results
 POST   /api/conversations/{id}/add-message         # Add AI message
@@ -166,10 +166,10 @@ POST   /api/learning/{user_node_id}/feedback       # Record outcome
 
 ## ✅ Success Criteria
 
-- [ ] Conversations logged ❌
-- [ ] Voting works correctly ❌
-- [ ] Consensus calculated ❌
-- [ ] WebSocket streaming works ❌
+- [x] Conversations logged ✅
+- [x] Voting works correctly ✅
+- [x] Consensus calculated ✅
+- [x] WebSocket streaming works ✅
 - [ ] **Learning data recorded** ❌
 - [ ] **Agent performance metrics updated** ❌
 - [ ] **Lessons learned stored** ❌
@@ -182,6 +182,3 @@ POST   /api/learning/{user_node_id}/feedback       # Record outcome
 
 **Phase 8 - Testing & Hardening**
 - See [phase-8-testing.md](phase-8-testing.md)
-
-
-

@@ -71,11 +71,10 @@ def test_base_agent_abstract_process():
     """Test that BaseAgent process is abstract"""
     # BaseAgent can't be instantiated directly
     with pytest.raises(TypeError):
-        agent = BaseAgent(
+        BaseAgent(
             role=AgentRole.MARKET_ANALYST,
             model_provider="gemini"
         )
-        await agent.process({})
 
 
 # ==================== ANALYZE TESTS ====================

@@ -109,7 +109,7 @@ class DemoWallet(BaseWallet):
     async def _ensure_db(self):
         """Ensure database connection"""
         if self.db is None:
-            self.db = await get_database()
+            self.db = get_database()
     
     async def _load_state(self) -> Dict[str, Any]:
         """

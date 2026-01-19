@@ -211,6 +211,8 @@ from app.modules.positions.router import router as positions_router
 from app.modules.ai_agents.router import router as ai_agents_router
 from app.modules.market.router import router as market_router
 from app.modules.flows.router import router as flows_router
+from app.modules.risk_rules.router import router as risk_rules_router
+from app.modules.conversations.router import router as conversations_router
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
@@ -233,6 +235,8 @@ app.include_router(positions_router, prefix="/api/v1")
 app.include_router(ai_agents_router, prefix="/api/v1")
 app.include_router(market_router, prefix="/api/v1")
 app.include_router(flows_router, prefix="/api/v1")
+app.include_router(risk_rules_router, prefix="/api/v1")
+app.include_router(conversations_router, prefix="/api/v1")
 
 # TODO: Add middleware (Sprint 31-33)
 # TODO: Include more routers (Sprint 16, 18, 22, 24, 26)
@@ -351,4 +355,3 @@ def custom_openapi():
 
 # Set custom OpenAPI
 app.openapi = custom_openapi
-

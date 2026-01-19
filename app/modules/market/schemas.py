@@ -7,7 +7,7 @@ Author: Moniqo Team
 Last Updated: 2026-01-17
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -92,3 +92,24 @@ class IndicatorsResponse(BaseModel):
     interval: str = Field(..., description="Timeframe interval")
     indicators: List[IndicatorValue] = Field(default=[], description="List of indicator values")
     summary: Optional[str] = Field(None, description="Overall technical summary")
+
+
+class MarketHealthResponse(BaseModel):
+    """Market health response"""
+    symbol: str = Field(..., description="Trading pair symbol")
+    volatility: float = Field(..., description="Volatility percentage")
+    trend: str = Field(..., description="bullish | bearish | sideways")
+    strength: int = Field(..., description="Trend strength 0-100")
+    crashDetected: bool = Field(..., description="Crash detection flag")
+    crashThreshold: float = Field(..., description="Crash threshold percent")
+
+
+class MarketDataResponse(BaseModel):
+    """Market data response with indicators and health"""
+    symbol: str = Field(..., description="Trading pair symbol")
+    interval: str = Field(..., description="Timeframe interval")
+    candles: List[CandleResponse] = Field(default=[], description="List of candles")
+    indicators: Optional[Dict[str, float]] = Field(default=None, description="Computed indicators")
+    current: TickerResponse
+    health: MarketHealthResponse
+    signal: Optional[Dict[str, Any]] = Field(default=None, description="Aggregated sentiment signal")

@@ -25,7 +25,7 @@ from app.modules.orders.schemas import (
     OrderCreateResponse,
     OrderCancelResponse
 )
-from app.integrations.wallets.factory import WalletFactory
+from app.integrations.wallets.factory import create_wallet_from_db
 from app.services.order_monitor import get_order_monitor
 from app.utils.logger import get_logger
 
@@ -345,15 +345,21 @@ async def cancel_order(
             OrderStatus.CANCELLING,
             request.reason or "User requested cancellation"
         )
-        
-        # TODO: Cancel on exchange
-        # For now, just mark as cancelling
-        
-        # Eventually will be cancelled
-        await order.update_status(
-            OrderStatus.CANCELLED,
-            "Order cancelled successfully"
-        )
+
+        if order.external_order_id:
+            wallet = await create_wallet_from_db(db, str(order.user_wallet_id))
+            await wallet.cancel_order(order.external_order_id, order.symbol)
+            await order.update_status(
+                OrderStatus.CANCELLED,
+                "Order cancelled successfully",
+                metadata={"exchange_cancel": True}
+            )
+        else:
+            await order.update_status(
+                OrderStatus.CANCELLED,
+                "Order cancelled without external order id",
+                metadata={"exchange_cancel": False}
+            )
         
         logger.info(f"Order {order_id} cancelled by user {user_id}")
         
@@ -409,5 +415,4 @@ async def monitor_order(
     except Exception as e:
         logger.error(f"Error monitoring order: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 

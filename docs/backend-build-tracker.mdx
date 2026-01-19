@@ -3,6 +3,9 @@
 **Purpose**: Track the backend build phases toward the original AI trading flow goal.  
 **Scope**: Backend only, demo mode (auth excluded).
 
+**Source of truth**: Phase 0+ / phase-overview docs define the detailed specs and acceptance criteria.  
+This tracker is a lightweight status mirror and should not override phase docs.
+
 ---
 
 ## Phase 0 — Baseline Wiring
@@ -44,37 +47,40 @@
   - Created `app/services/signal_aggregator.py`
   - Combines all sources with weighted average
   - Outputs `AggregatedSignal` with score, confidence, classification
+- [x] Wire aggregated signals into flow execution context
+  - `execute_flow` now fetches and attaches signal data for AI agents
 
 ---
 
 ## Phase 2 — AI Pre-Trade Flow
 
-**Status**: ⏳ Not started
+**Status**: ✅ Complete
 
-- [ ] Pre-trade evaluator agent (market + sentiment + indicators)
-- [ ] Entry gate (only execute if signal + risk pass)
-- [ ] Decision logging (model, tokens, cost, reasoning)
+- [x] Pre-trade evaluator gate (market + sentiment + indicators)
+- [x] Entry gate (skip risk step when confidence/signal criteria fail)
+- [x] Decision logging (model, tokens, cost, reasoning)
 
 ---
 
 ## Phase 3 — Risk Rules Engine
 
-**Status**: ⏳ Not started
+**Status**: ✅ Complete
 
-- [ ] Risk rules schema + persistence
-- [ ] Validate proposed trade against limits
-- [ ] Wire risk manager input to real limits + portfolio state
+- [x] Risk rules schema + persistence (risk_rules collection + CRUD)
+- [x] Validate proposed trade against limits (flow config + portfolio state)
+- [x] Hard-limit gate added before AI risk manager (config or risk_rules)
+- [x] Wire risk manager input to real limits + portfolio state
 
 ---
 
 ## Phase 4 — Exchange Execution
 
-**Status**: ⏳ Not started
+**Status**: 🚧 In progress
 
-- [ ] Decrypt credentials and build exchange client
-- [ ] Place order on exchange
-- [ ] Cancel order on exchange
-- [ ] Retry + failure handling
+- [x] Decrypt credentials and build exchange client
+- [x] Place order on exchange
+- [x] Cancel order on exchange
+- [x] Retry + failure handling
 
 ---
 
@@ -167,4 +173,3 @@ FROM_EMAIL=noreply@example.com
 SUPERADMIN_EMAIL=admin@example.com
 SUPERADMIN_PASSWORD=admin123
 ```
-

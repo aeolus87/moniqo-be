@@ -8,11 +8,15 @@ Author: Moniqo Team
 Last Updated: 2026-01-17
 """
 
-from typing import Optional
+from typing import Optional, Any
 from fastapi import APIRouter, HTTPException, Query, Depends
+from bson import ObjectId
+from decimal import Decimal
+from enum import Enum
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config.database import get_database
+from app.core.dependencies import get_current_user_optional
 from app.modules.flows.schemas import (
     FlowCreate,
     FlowUpdate,
@@ -30,6 +34,20 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/flows", tags=["Flows"])
+
+
+def _to_response_payload(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {key: _to_response_payload(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_response_payload(item) for item in value]
+    return value
 
 
 def flow_to_response(flow) -> FlowResponse:
@@ -62,7 +80,7 @@ def execution_to_response(execution) -> ExecutionResponse:
             status=s.status,
             started_at=s.started_at,
             completed_at=s.completed_at,
-            data=s.data,
+            data=_to_response_payload(s.data),
             error=s.error,
         )
         for s in execution.steps
@@ -210,17 +228,127 @@ async def delete_flow(
 # ==================== FLOW EXECUTION ====================
 
 @router.post(
+    "/{flow_id}/start",
+    response_model=FlowResponse,
+    summary="Start continuous trading",
+    description="Start continuous trading flow - loops until manually stopped via /stop",
+)
+async def start_flow_endpoint(
+    flow_id: str,
+    trigger_request: Optional[TriggerFlowRequest] = None,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    """
+    Start continuous trading flow.
+    
+    This will:
+    1. Set flow status to ACTIVE
+    2. Reset cycle counter
+    3. Trigger first execution
+    4. Continue looping automatically until stopped
+    
+    The flow will keep running through cycles:
+    - Fetch market data
+    - AI analysis (solo or swarm)
+    - Risk checks
+    - Execute trade (if approved)
+    - Monitor position
+    - Close position (SL/TP)
+    - Loop back to start
+    
+    Use POST /flows/{flow_id}/stop to stop the continuous loop.
+    """
+    flow = await flow_service.get_flow_by_id(db, flow_id)
+    
+    if not flow:
+        raise HTTPException(status_code=404, detail=f"Flow not found: {flow_id}")
+    
+    try:
+        # Set user_id in flow config if authenticated user and not already set
+        if current_user and not (flow.config or {}).get("user_id"):
+            if not flow.config:
+                flow.config = {}
+            flow.config["user_id"] = str(current_user["_id"])
+            # Update flow document
+            await db[flow_service.FLOWS_COLLECTION].update_one(
+                {"_id": ObjectId(flow.id)},
+                {"$set": {"config.user_id": str(current_user["_id"])}}
+            )
+            logger.info(f"Set user_id in flow config: {current_user['_id']}")
+            # Refresh flow to get updated config
+            flow = await flow_service.get_flow_by_id(db, flow_id)
+        
+        model_provider = trigger_request.model_provider if trigger_request else "groq"
+        model_name = trigger_request.model_name if trigger_request else None
+        
+        updated_flow = await flow_service.start_flow(
+            db, flow_id, model_provider, model_name
+        )
+        
+        if not updated_flow:
+            raise HTTPException(status_code=500, detail="Failed to start flow")
+        
+        return flow_to_response(updated_flow)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start flow: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to start flow: {str(e)}")
+
+
+@router.post(
+    "/{flow_id}/stop",
+    response_model=FlowResponse,
+    summary="Stop continuous trading",
+    description="Stop continuous trading flow - breaks the auto-loop",
+)
+async def stop_flow_endpoint(
+    flow_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """
+    Stop continuous trading flow.
+    
+    This will:
+    1. Set flow status to PAUSED
+    2. Break the auto-loop (next cycle will not execute)
+    
+    Note: Any currently running execution will complete, but no new cycles will start.
+    Use POST /flows/{flow_id}/start to restart the continuous loop.
+    """
+    flow = await flow_service.get_flow_by_id(db, flow_id)
+    
+    if not flow:
+        raise HTTPException(status_code=404, detail=f"Flow not found: {flow_id}")
+    
+    try:
+        updated_flow = await flow_service.stop_flow(db, flow_id)
+        
+        if not updated_flow:
+            raise HTTPException(status_code=500, detail="Failed to stop flow")
+        
+        return flow_to_response(updated_flow)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to stop flow: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop flow: {str(e)}")
+
+
+@router.post(
     "/{flow_id}/trigger",
     response_model=ExecutionResponse,
     summary="Trigger flow",
-    description="Trigger a flow execution with AI analysis",
+    description="Trigger a single flow execution with AI analysis (does not start continuous loop)",
 )
 async def trigger_flow(
     flow_id: str,
     trigger_request: Optional[TriggerFlowRequest] = None,
     db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
-    """Trigger flow execution"""
+    """Trigger a single flow execution (use /start for continuous trading)"""
     flow = await flow_service.get_flow_by_id(db, flow_id)
     
     if not flow:
@@ -233,6 +361,20 @@ async def trigger_flow(
         )
     
     try:
+        # Set user_id in flow config if authenticated user and not already set
+        if current_user and not (flow.config or {}).get("user_id"):
+            if not flow.config:
+                flow.config = {}
+            flow.config["user_id"] = str(current_user["_id"])
+            # Update flow document
+            await db[flow_service.FLOWS_COLLECTION].update_one(
+                {"_id": ObjectId(flow.id)},
+                {"$set": {"config.user_id": str(current_user["_id"])}}
+            )
+            logger.info(f"Set user_id in flow config: {current_user['_id']}")
+            # Refresh flow to get updated config
+            flow = await flow_service.get_flow_by_id(db, flow_id)
+        
         model_provider = trigger_request.model_provider if trigger_request else "groq"
         model_name = trigger_request.model_name if trigger_request else None
         

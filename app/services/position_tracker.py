@@ -13,7 +13,11 @@ from decimal import Decimal
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.modules.positions.models import Position, PositionStatus, PositionSide, PositionUpdate
-from app.integrations.wallets.factory import WalletFactory
+from app.modules.flows.models import FlowStatus
+from app.integrations.wallets.base import OrderSide, OrderType, TimeInForce
+from app.integrations.wallets.factory import create_wallet_from_db
+from app.modules.ai_agents.monitor_agent import MonitorAgent
+from app.services.signal_aggregator import get_signal_aggregator
 from app.services.websocket_manager import get_websocket_manager
 from app.utils.logger import get_logger
 
@@ -55,7 +59,7 @@ class PositionTrackerService:
             db: MongoDB database instance
         """
         self.db = db
-        self.wallet_factory = WalletFactory()
+        self.signal_aggregator = get_signal_aggregator()
         
         logger.info("Position tracker service initialized")
     
@@ -149,15 +153,63 @@ class PositionTrackerService:
                 }
             
             # Get current price from market
-            wallet_instance = await self.wallet_factory.create_wallet(
-                wallet_id=str(position.user_wallet_id),
-                user_wallet_id=str(position.user_wallet_id)
-            )
-            
+            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
             current_price = await wallet_instance.get_market_price(position.symbol)
             
             # Update position
             result = await self.update_position_price(str(position.id), current_price)
+
+            # Enrich monitoring with sentiment + AI re-evaluation
+            try:
+                base_symbol = position.symbol.split("/")[0] if "/" in position.symbol else position.symbol
+                signal_data = (await self.signal_aggregator.get_signal(base_symbol.upper())).to_dict()
+
+                monitor_agent = MonitorAgent(
+                    model_provider=position.ai_monitoring.get("model_provider", "groq")
+                    if position.ai_monitoring else "groq"
+                )
+                monitor_result = await monitor_agent.process({
+                    "positions": [
+                        {
+                            "id": str(position.id),
+                            "symbol": position.symbol,
+                            "side": position.side.value,
+                            "entry_price": position.entry.get("price"),
+                            "current_price": float(current_price),
+                            "unrealized_pnl": float(position.current.get("unrealized_pnl", 0)),
+                            "unrealized_pnl_percent": float(position.current.get("unrealized_pnl_percent", 0)),
+                            "risk_level": position.current.get("risk_level"),
+                            "stop_loss": position.risk_management.get("current_stop_loss"),
+                            "take_profit": position.risk_management.get("current_take_profit"),
+                        }
+                    ],
+                    "market_data": {
+                        "summary": signal_data.get("classification"),
+                        "signal": signal_data,
+                    },
+                })
+
+                position.ai_monitoring = position.ai_monitoring or {}
+                position.ai_monitoring["last_signal"] = signal_data
+                position.ai_monitoring["last_ai_review"] = {
+                    "timestamp": datetime.now(timezone.utc),
+                    "result": monitor_result,
+                }
+                await position.save()
+
+                await self._apply_ai_recommendations(position, monitor_result)
+
+                # Automated close based on AI recommendation
+                for rec in monitor_result.get("recommendations", []):
+                    if rec.get("position_id") == str(position.id) and rec.get("action") in ["close", "exit"]:
+                        await self._close_position_with_order(
+                            position=position,
+                            wallet=wallet_instance,
+                            reason=rec.get("reason", "ai_signal"),
+                        )
+                        break
+            except Exception as e:
+                logger.error(f"AI monitoring failed for position {position_id}: {str(e)}")
             
             return result
         
@@ -326,10 +378,7 @@ class PositionTrackerService:
         """Trigger stop loss for position"""
         try:
             # Create exit order
-            wallet_instance = await self.wallet_factory.create_wallet(
-                wallet_id=str(position.user_wallet_id),
-                user_wallet_id=str(position.user_wallet_id)
-            )
+            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
             
             # Place market sell order to close position
             exit_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
@@ -345,6 +394,12 @@ class PositionTrackerService:
             )
             
             logger.info(f"Stop loss triggered for position {position.id} at {current_price}")
+            
+            # RecordLearning - happens before EndCycle
+            await self._record_learning_outcome(position, "stop_loss")
+            
+            # Trigger flow continuation - EndCycle --> WaitTrigger
+            await self._trigger_flow_continuation(str(position.flow_id))
         
         except Exception as e:
             logger.error(f"Error triggering stop loss: {str(e)}")
@@ -361,6 +416,12 @@ class PositionTrackerService:
             )
             
             logger.info(f"Take profit triggered for position {position.id} at {current_price}")
+            
+            # RecordLearning - happens before EndCycle
+            await self._record_learning_outcome(position, "take_profit")
+            
+            # Trigger flow continuation - EndCycle --> WaitTrigger
+            await self._trigger_flow_continuation(str(position.flow_id))
         
         except Exception as e:
             logger.error(f"Error triggering take profit: {str(e)}")
@@ -457,6 +518,197 @@ class PositionTrackerService:
         
         except Exception as e:
             logger.error(f"Error checking break-even: {str(e)}")
+
+    async def _close_position_with_order(
+        self,
+        position: Position,
+        wallet,
+        reason: str,
+    ) -> None:
+        """Place a market order to close the position and persist exit data."""
+        if not position.is_open():
+            return
+
+        close_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
+        quantity = Decimal(str(position.entry.get("amount", 0)))
+        if quantity <= 0:
+            return
+
+        order_result = await wallet.place_order(
+            symbol=position.symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            quantity=quantity,
+            time_in_force=TimeInForce.GTC,
+        )
+
+        exit_price = order_result.get("average_price") or order_result.get("price")
+        exit_price = Decimal(str(exit_price)) if exit_price else Decimal(str(position.current.get("price", 0)))
+        fee = Decimal(str(order_result.get("fee", 0))) if order_result.get("fee") else Decimal("0")
+        fee_currency = order_result.get("fee_currency", "USDT")
+
+        await position.close(
+            order_id=position.id,  # TODO: map to real exit order id
+            price=exit_price,
+            reason=reason,
+            fees=fee,
+            fee_currency=fee_currency,
+        )
+
+        await self._record_transaction(
+            position=position,
+            reason=reason,
+            price=exit_price,
+            fee=fee,
+            fee_currency=fee_currency,
+            order_id=order_result.get("order_id"),
+            status="filled",
+        )
+        
+        # RecordLearning - happens before EndCycle
+        await self._record_learning_outcome(position, reason)
+        
+        # Trigger flow continuation - EndCycle --> WaitTrigger
+        await self._trigger_flow_continuation(str(position.flow_id))
+
+    async def _apply_ai_recommendations(
+        self,
+        position: Position,
+        monitor_result: Dict[str, Any],
+    ) -> None:
+        """Apply AI-driven stop-loss/take-profit recommendations."""
+        recommendations = monitor_result.get("recommendations", [])
+        if not recommendations:
+            return
+
+        updated = False
+        for rec in recommendations:
+            if rec.get("position_id") != str(position.id):
+                continue
+            action = rec.get("action")
+            value = rec.get("value")
+            if value is None:
+                continue
+            if action == "update_stop_loss":
+                position.risk_management["current_stop_loss"] = float(value)
+                updated = True
+            elif action == "update_take_profit":
+                position.risk_management["current_take_profit"] = float(value)
+                updated = True
+
+        if updated:
+            await position.save()
+
+    async def _record_transaction(
+        self,
+        position: Position,
+        reason: str,
+        price: Decimal,
+        fee: Decimal,
+        fee_currency: str,
+        order_id: Optional[str],
+        status: str,
+    ) -> None:
+        """Insert a transaction ledger entry for a position close."""
+        try:
+            exit_data = position.exit or {}
+            pnl = Decimal(str(exit_data.get("realized_pnl", 0)))
+            pnl_percent = Decimal(str(exit_data.get("realized_pnl_percent", 0)))
+            quantity = Decimal(str(exit_data.get("amount", position.entry.get("amount", 0))))
+            total_value = quantity * price
+
+            await self.db["transactions"].insert_one({
+                "user_id": position.user_id,
+                "position_id": position.id,
+                "flow_id": position.flow_id,
+                "exchange": "wallet",
+                "symbol": position.symbol,
+                "type": "sell" if position.side == PositionSide.LONG else "buy",
+                "side": position.side.value,
+                "quantity": float(quantity),
+                "price": float(price),
+                "total_value": float(total_value),
+                "fee": float(fee),
+                "fee_currency": fee_currency,
+                "pnl": float(pnl),
+                "pnl_percent": float(pnl_percent),
+                "order_id": order_id,
+                "status": status,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc),
+                "created_at": datetime.now(timezone.utc),
+            })
+        except Exception as e:
+            logger.error(f"Failed to record transaction for position {position.id}: {e}")
+
+    async def _record_learning_outcome(
+        self,
+        position: Position,
+        reason: str,
+    ) -> None:
+        """
+        Record learning outcome when position closes.
+        
+        This implements the RecordLearning step from the flowchart,
+        which happens before EndCycle --> WaitTrigger.
+        """
+        try:
+            exit_data = position.exit or {}
+            pnl = float(exit_data.get("realized_pnl", 0))
+            pnl_percent = float(exit_data.get("realized_pnl_percent", 0))
+            
+            learning_record = {
+                "user_id": position.user_id,
+                "flow_id": position.flow_id,
+                "position_id": position.id,
+                "symbol": position.symbol,
+                "action": "close",
+                "close_reason": reason,
+                "side": position.side.value,
+                "entry_price": position.entry.get("price"),
+                "exit_price": exit_data.get("price"),
+                "quantity": position.entry.get("amount"),
+                "realized_pnl": pnl,
+                "realized_pnl_percent": pnl_percent,
+                "outcome": "profit" if pnl > 0 else ("loss" if pnl < 0 else "breakeven"),
+                "risk_management": position.risk_management,
+                "ai_monitoring": position.ai_monitoring,
+                "opened_at": position.opened_at,
+                "closed_at": position.closed_at,
+                "created_at": datetime.now(timezone.utc),
+            }
+            
+            await self.db["learning_outcomes"].insert_one(learning_record)
+            logger.info(f"Recorded learning outcome for position {position.id}: {reason} - PnL: {pnl:.2f}")
+        except Exception as e:
+            logger.error(f"Failed to record learning outcome for position {position.id}: {e}")
+
+    async def _trigger_flow_continuation(self, flow_id: str) -> None:
+        """
+        Trigger next trading cycle after position closes.
+        
+        This ensures the continuous loop continues:
+        EndCycle --> WaitTrigger --> next execution
+        """
+        if not flow_id:
+            return
+        
+        try:
+            from app.modules.flows import service as flow_service
+            
+            flow = await flow_service.get_flow_by_id(self.db, str(flow_id))
+            if not flow:
+                logger.warning(f"Flow not found for continuation: {flow_id}")
+                return
+            
+            if flow.status != FlowStatus.ACTIVE:
+                logger.info(f"Flow {flow_id} is not active, skipping continuation")
+                return
+            
+            logger.info(f"Triggering flow continuation after position close: {flow_id}")
+            await flow_service._schedule_auto_loop(self.db, flow, "groq", None)
+        except Exception as e:
+            logger.error(f"Failed to trigger flow continuation for {flow_id}: {e}")
 
 
 # Global instance helper

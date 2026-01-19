@@ -1,6 +1,6 @@
 # Phase 3 - AI Agent Foundations
 
-**Status:** ⏳ PENDING  
+**Status:** 🚧 PARTIAL (core agents + prompts endpoints exist; templates/user_nodes missing)  
 **Duration:** 8 days  
 **Dependencies:** Phase 2 (Wallet Foundations)
 
@@ -13,6 +13,14 @@ Build the AI agent management system with:
 - User agent instance configuration
 - AI provider abstraction layer
 - Performance tracking for learning
+
+---
+
+## ✅ Current Implementation Snapshot
+
+- Core agents implemented: MarketAnalyst, RiskManager, Executor, Monitor
+- AI provider factory + health check endpoints available
+- Prompt inspection endpoint available for agent roles
 
 ---
 
@@ -153,7 +161,7 @@ GET    /api/user-nodes/{id}/performance    # Learning stats
 ## ✅ Success Criteria
 
 - [ ] Agent templates seeded
-- [ ] User can list available agents
+- [ ] User can list available agents (templates)
 - [ ] User can create agent instances
 - [ ] Symbols validated against wallet
 - [ ] Performance tracking placeholders

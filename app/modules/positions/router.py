@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from bson import ObjectId
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, get_current_user_optional
 from app.config.database import get_database
 from app.modules.positions.models import Position, PositionStatus, PositionSide
 from app.modules.positions.schemas import (
@@ -57,6 +57,9 @@ async def get_position(
             raise HTTPException(status_code=403, detail="Access denied")
         
         # Convert to response
+        entry_payload = dict(position.entry or {})
+        entry_payload.setdefault("leverage", 1)
+        entry_payload.setdefault("margin_used", entry_payload.get("value", 0))
         return PositionResponse(
             id=str(position.id),
             user_id=str(position.user_id),
@@ -65,7 +68,7 @@ async def get_position(
             symbol=position.symbol,
             side=position.side.value,
             status=position.status.value,
-            entry=EntryDataResponse(**position.entry),
+            entry=EntryDataResponse(**entry_payload),
             current=CurrentDataResponse(**position.current) if position.current else None,
             risk_management=RiskManagementResponse(**position.risk_management) if position.risk_management else RiskManagementResponse(),
             exit=ExitDataResponse(**position.exit) if position.exit else None,
@@ -85,57 +88,151 @@ async def get_position(
 
 # ==================== LIST POSITIONS ====================
 
-@router.get("/", response_model=PositionListResponse)
+@router.get("", response_model=PositionListResponse)
 async def list_positions(
     status: Optional[PositionStatus] = Query(None, description="Filter by status"),
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Page size"),
-    current_user: dict = Depends(get_current_user),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
     db = Depends(get_database)
 ):
-    """List positions for current user"""
+    """List positions for current user (or demo user if not authenticated)"""
     try:
-        user_id = current_user["_id"]
+        # If authenticated, use authenticated user_id
+        # Otherwise, use demo user for demo mode
+        if current_user:
+            user_id = current_user["_id"]
+        else:
+            # Get demo user for unauthenticated requests (demo mode)
+            auth = await db["auth"].find_one({"email": "demo@moniqo.com", "is_deleted": False})
+            if not auth:
+                # Return empty list if no demo user exists
+                return PositionListResponse(
+                    positions=[],
+                    total=0,
+                    page=page,
+                    page_size=page_size
+                )
+            user = await db["users"].find_one({"auth_id": auth["_id"], "is_deleted": False})
+            if not user:
+                return PositionListResponse(
+                    positions=[],
+                    total=0,
+                    page=page,
+                    page_size=page_size
+                )
+            user_id = user["_id"]
         
-        # Build query
-        query = Position.find(Position.user_id == ObjectId(user_id) if isinstance(user_id, str) else user_id)
+        user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
         
-        if status:
-            query = query.find(Position.status == status)
-        
-        if symbol:
-            query = query.find(Position.symbol == symbol)
-        
-        # Get total count
-        total = await query.count()
-        
-        # Paginate
-        skip = (page - 1) * page_size
-        positions = await query.skip(skip).limit(page_size).sort(-Position.opened_at if Position.opened_at else -Position.created_at).to_list()
-        
-        # Convert to response
-        position_responses = [
-            PositionResponse(
-                id=str(position.id),
-                user_id=str(position.user_id),
-                user_wallet_id=str(position.user_wallet_id),
-                flow_id=str(position.flow_id) if position.flow_id else None,
-                symbol=position.symbol,
-                side=position.side.value,
-                status=position.status.value,
-                entry=EntryDataResponse(**position.entry),
-                current=CurrentDataResponse(**position.current) if position.current else None,
-                risk_management=RiskManagementResponse(**position.risk_management) if position.risk_management else RiskManagementResponse(),
-                exit=ExitDataResponse(**position.exit) if position.exit else None,
-                statistics=position.statistics,
-                created_at=position.created_at,
-                opened_at=position.opened_at,
-                closed_at=position.closed_at,
-                updated_at=position.updated_at
+        # Build query - try Beanie first, fallback to raw MongoDB if needed
+        try:
+            # Beanie query - filter by user_id and deleted_at
+            query = Position.find(
+                Position.user_id == user_id_obj,
+                Position.deleted_at == None
             )
-            for position in positions
-        ]
+            
+            if status:
+                query = query.find(Position.status == status)
+            
+            if symbol:
+                query = query.find(Position.symbol == symbol)
+            
+            # Get total count
+            total = await query.count()
+            
+            # Paginate
+            skip = (page - 1) * page_size
+            positions = await query.skip(skip).limit(page_size).sort(-Position.opened_at if Position.opened_at else -Position.created_at).to_list()
+        except Exception as beanie_error:
+            # Fallback to raw MongoDB query if Beanie fails
+            logger.warning(f"Beanie query failed, using raw MongoDB: {beanie_error}")
+            query_dict = {"user_id": user_id_obj, "deleted_at": None}
+            if status:
+                query_dict["status"] = status.value if hasattr(status, 'value') else str(status)
+            if symbol:
+                query_dict["symbol"] = symbol
+            
+            total = await db.positions.count_documents(query_dict)
+            skip = (page - 1) * page_size
+            cursor = db.positions.find(query_dict).skip(skip).limit(page_size).sort("opened_at", -1)
+            raw_positions = await cursor.to_list(length=page_size)
+            
+            # Build response directly from raw docs (handles None values for user_wallet_id)
+            position_responses = []
+            for doc in raw_positions:
+                try:
+                    entry_payload = dict(doc.get("entry") or {})
+                    entry_payload.setdefault("leverage", 1)
+                    entry_payload.setdefault("margin_used", entry_payload.get("value", 0))
+                    
+                    # Handle user_wallet_id - can be None for simulated positions
+                    user_wallet_id = doc.get("user_wallet_id")
+                    if user_wallet_id is None:
+                        # Use a placeholder or empty string for simulated positions
+                        user_wallet_id_str = ""
+                    else:
+                        user_wallet_id_str = str(user_wallet_id)
+                    
+                    position_responses.append(
+                        PositionResponse(
+                            id=str(doc.get("_id")),
+                            user_id=str(doc.get("user_id")),
+                            user_wallet_id=user_wallet_id_str,
+                            flow_id=str(doc.get("flow_id")) if doc.get("flow_id") else None,
+                            symbol=doc.get("symbol", ""),
+                            side=doc.get("side", ""),
+                            status=doc.get("status", ""),
+                            entry=EntryDataResponse(**entry_payload),
+                            current=CurrentDataResponse(**doc.get("current", {})) if doc.get("current") else None,
+                            risk_management=RiskManagementResponse(**doc.get("risk_management", {})) if doc.get("risk_management") else RiskManagementResponse(),
+                            exit=ExitDataResponse(**doc.get("exit", {})) if doc.get("exit") else None,
+                            statistics=doc.get("statistics", {}),
+                            created_at=doc.get("created_at"),   
+                            opened_at=doc.get("opened_at"),
+                            closed_at=doc.get("closed_at"),
+                            updated_at=doc.get("updated_at")
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to convert position doc {doc.get('_id')}: {e}")
+                    continue
+            
+            return PositionListResponse(
+                positions=position_responses,
+                total=total,
+                page=page,
+                page_size=page_size
+            )
+        
+        # Convert to response (Beanie path)
+        position_responses = []
+        for position in positions:
+            entry_payload = dict(position.entry or {})
+            entry_payload.setdefault("leverage", 1)
+            entry_payload.setdefault("margin_used", entry_payload.get("value", 0))
+            position_responses.append(
+                PositionResponse(
+                    id=str(position.id),
+                    user_id=str(position.user_id),
+                    user_wallet_id=str(position.user_wallet_id) if position.user_wallet_id else "",
+                    flow_id=str(position.flow_id) if position.flow_id else None,
+                    symbol=position.symbol,
+                    side=position.side.value if hasattr(position.side, 'value') else str(position.side),
+                    status=position.status.value if hasattr(position.status, 'value') else str(position.status),
+                    entry=EntryDataResponse(**entry_payload),
+                    current=CurrentDataResponse(**position.current) if position.current else None,
+                    risk_management=RiskManagementResponse(**position.risk_management) if position.risk_management else RiskManagementResponse(),
+                    exit=ExitDataResponse(**position.exit) if position.exit else None,
+                    statistics=position.statistics,
+                    created_at=position.created_at,
+                    opened_at=position.opened_at,
+                    closed_at=position.closed_at,
+                    updated_at=position.updated_at
+                )
+            )
         
         return PositionListResponse(
             positions=position_responses,
@@ -284,6 +381,16 @@ async def close_position(
             reason=reason,
             fees=Decimal("0")  # TODO: Calculate actual fees
         )
+
+        await tracker_service._record_transaction(
+            position=position,
+            reason=reason,
+            price=current_price,
+            fee=Decimal("0"),
+            fee_currency="USDT",
+            order_id=None,
+            status="filled",
+        )
         
         logger.info(f"Position {position_id} closed by user {user_id}")
         
@@ -341,5 +448,3 @@ async def monitor_position(
     except Exception as e:
         logger.error(f"Error monitoring position: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-

@@ -23,6 +23,22 @@ This document provides an overview of all implementation phases for the Moniqo A
 
 ---
 
+## ✅ Demo Task: Force Position Mode (Solo)
+
+**Goal:** Ensure demo flows always open a position even when risk gates would normally block it.
+
+**Specs (minimal):**
+- Config flag `demo_force_position` on flow config.
+- When enabled, skip pre-trade gate + risk rejection and proceed to execution.
+- Only applies to solo mode; must be clearly labeled as demo-only in logs/decision data.
+
+**Acceptance Criteria:**
+- Triggering a solo flow with `demo_force_position=true` results in a position record even if risk/analysis would otherwise end in `hold`.
+- Execution response includes `decision.data.force_position: true` and a reason string noting the override.
+- Default behavior unchanged when flag is false or missing.
+
+---
+
 ## 🏗️ Architecture Principles
 
 ### Test-Driven Development (TDD)
