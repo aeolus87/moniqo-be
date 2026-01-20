@@ -1431,6 +1431,85 @@ async def execute_flow(
                 final_action = effective_action
             final_reasoning = f"{final_reasoning} Demo force position override: {demo_force_reason or 'enabled'}."
 
+        single_position_mode = bool(execution_config.get("single_position_mode", True))
+        if single_position_mode and final_action in ["buy", "sell"]:
+            user_id = execution_config.get("user_id") or (flow.config or {}).get("user_id")
+            flow_id_obj = _to_object_id(execution.flow_id) or execution.flow_id
+            user_id_obj = _to_object_id(user_id) or user_id if user_id else None
+
+            query = {
+                "flow_id": flow_id_obj,
+                "status": {"$in": [PositionStatus.OPEN.value, PositionStatus.OPENING.value]},
+                "deleted_at": None,
+            }
+            if user_id_obj:
+                query["user_id"] = user_id_obj
+
+            existing_position = await db[POSITIONS_COLLECTION].find_one(
+                query,
+                sort=[("opened_at", -1)],
+            )
+            if existing_position:
+                existing_side = existing_position.get("side")
+                existing_action = "buy" if existing_side == PositionSide.LONG.value else "sell"
+                if existing_action == final_action:
+                    final_action = "hold"
+                    final_reasoning = (
+                        f"{final_reasoning} Single-position mode active: "
+                        f"existing {existing_side} position already open; skipping new order."
+                    )
+                else:
+                    close_price = market_context.get("current_price") or existing_position.get("current", {}).get("price")
+                    close_price = close_price or existing_position.get("entry", {}).get("price")
+                    close_price = Decimal(str(close_price or 0))
+                    if close_price > 0:
+                        try:
+                            position_doc = await Position.get(str(existing_position.get("_id")))
+                        except Exception as e:
+                            logger.warning(f"Failed to close existing position {existing_position.get('_id')}: {e}")
+                            position_doc = None
+
+                        if position_doc and position_doc.is_open():
+                            await position_doc.close(
+                                order_id=position_doc.id,
+                                price=close_price,
+                                reason="reverse_signal",
+                                fees=Decimal("0"),
+                            )
+                        else:
+                            entry_data = existing_position.get("entry", {})
+                            entry_amount = Decimal(str(entry_data.get("amount", 0)))
+                            exit_value = entry_amount * close_price
+                            exit_data = {
+                                "order_id": str(existing_position.get("_id")),
+                                "timestamp": datetime.now(timezone.utc),
+                                "price": float(close_price),
+                                "amount": float(entry_amount),
+                                "value": float(exit_value),
+                                "fees": 0.0,
+                                "fee_currency": "USDT",
+                                "reason": "reverse_signal",
+                                "realized_pnl": 0.0,
+                                "realized_pnl_percent": 0.0,
+                                "time_held_minutes": 0,
+                            }
+                            await db[POSITIONS_COLLECTION].update_one(
+                                {"_id": existing_position.get("_id")},
+                                {
+                                    "$set": {
+                                        "status": PositionStatus.CLOSED.value,
+                                        "closed_at": datetime.now(timezone.utc),
+                                        "updated_at": datetime.now(timezone.utc),
+                                        "exit": exit_data,
+                                    }
+                                },
+                            )
+
+                        final_reasoning = (
+                            f"{final_reasoning} Single-position mode active: "
+                            f"closed existing {existing_side} position before opening {final_action}."
+                        )
+
         order_record = None
         position_record = None
         if final_action in ["buy", "sell"]:

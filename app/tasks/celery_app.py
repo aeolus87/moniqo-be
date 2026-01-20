@@ -18,7 +18,7 @@ Last Updated: 2025-11-22
 """
 
 from celery import Celery
-from celery.schedules import crontab
+from celery.schedules import crontab, timedelta
 from app.config.settings import get_settings
 
 settings = get_settings()
@@ -89,10 +89,10 @@ celery_app.conf.update(
             "options": {"queue": "orders"}
         },
         
-        # Monitor all open positions every minute
+        # Monitor all open positions every 15 seconds for real-time updates
         "monitor-all-positions": {
             "task": "app.tasks.order_tasks.monitor_all_positions_task",
-            "schedule": crontab(minute="*"),  # Every minute
+            "schedule": timedelta(seconds=15),  # Every 15 seconds
             "options": {"queue": "orders"}
         },
         

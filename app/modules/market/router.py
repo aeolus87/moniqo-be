@@ -9,6 +9,7 @@ Last Updated: 2026-01-17
 """
 
 from typing import List, Optional
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
 
 from app.integrations.market_data import (
@@ -72,6 +73,8 @@ async def get_ohlc(
                 for c in candles
             ],
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch OHLC for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {str(e)}")
@@ -156,6 +159,8 @@ async def get_market_data(
         )
     except HTTPException:
         raise
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch market data for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {str(e)}")
@@ -205,6 +210,8 @@ async def get_market_health(
         )
     except HTTPException:
         raise
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch market health for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch market health: {str(e)}")
@@ -239,6 +246,8 @@ async def get_ticker(symbol: str):
         )
     except HTTPException:
         raise
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch ticker for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch ticker: {str(e)}")
@@ -267,6 +276,8 @@ async def get_price(symbol: str):
             price=float(price),
         )
     except HTTPException:
+        raise
+    except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.error(f"Failed to fetch price for {symbol}: {str(e)}")
@@ -304,6 +315,8 @@ async def get_tickers(
             )
             for t in tickers
         ]
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch tickers: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch tickers: {str(e)}")
@@ -338,6 +351,8 @@ async def get_global_stats():
             volumeChange24h=float(stats.volume_change_24h),
         )
     except HTTPException:
+        raise
+    except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.error(f"Failed to fetch global stats: {str(e)}")
@@ -382,6 +397,8 @@ async def get_top_coins(
                 for c in coins
             ]
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch top coins: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch top coins: {str(e)}")
@@ -421,6 +438,8 @@ async def get_coin_info(symbol: str):
             totalSupply=float(coin.total_supply),
         )
     except HTTPException:
+        raise
+    except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.error(f"Failed to fetch coin info for {symbol}: {str(e)}")
@@ -474,6 +493,8 @@ async def get_indicators(
             summary=result["summary"],
         )
     except HTTPException:
+        raise
+    except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.error(f"Failed to calculate indicators for {symbol}: {str(e)}")

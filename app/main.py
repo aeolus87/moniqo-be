@@ -20,12 +20,36 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from contextlib import asynccontextmanager
+import asyncio
+import socketio
 from app.config import settings
-from app.config.database import connect_to_mongodb, close_mongodb_connection
+from app.config.database import connect_to_mongodb, close_mongodb_connection, get_database
 from app.utils.cache import get_redis_client, close_redis_client
 from app.utils.logger import get_logger
+from app.services.position_tracker import get_position_tracker
 
 logger = get_logger(__name__)
+
+
+async def _position_monitor_loop() -> None:
+    """Continuously monitor positions and emit Socket.IO updates."""
+    interval = max(1, int(getattr(settings, "POSITION_MONITOR_INTERVAL_SECONDS", 5)))
+    while True:
+        try:
+            db = get_database()
+            tracker = await get_position_tracker(db)
+            await tracker.monitor_all_positions()
+        except Exception as e:
+            logger.warning(f"Position monitor loop error: {e}")
+        await asyncio.sleep(interval)
+
+# Create Socket.IO server
+sio = socketio.AsyncServer(
+    cors_allowed_origins="*",
+    async_mode='asgi',
+    logger=True,
+    engineio_logger=True
+)
 
 
 @asynccontextmanager
@@ -38,12 +62,17 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting application...")
     
+    position_task: asyncio.Task | None = None
     try:
         # Connect to MongoDB
         await connect_to_mongodb()
         
         # Connect to Redis
         await get_redis_client()
+
+        if getattr(settings, "POSITION_MONITOR_ENABLED", True):
+            position_task = asyncio.create_task(_position_monitor_loop())
+            app.state.position_monitor_task = position_task
         
         # TODO: Run initialization scripts (Sprint 34)
         
@@ -58,6 +87,13 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down application...")
     
     try:
+        if position_task:
+            position_task.cancel()
+            try:
+                await position_task
+            except asyncio.CancelledError:
+                pass
+
         # Close MongoDB connection
         await close_mongodb_connection()
         
@@ -355,3 +391,59 @@ def custom_openapi():
 
 # Set custom OpenAPI
 app.openapi = custom_openapi
+
+# Socket.IO event handlers
+@sio.on('connect')
+async def connect(sid, environ, auth):
+    """Handle client connection"""
+    logger.info(f'Client connected: {sid}, auth: {auth}')
+    if auth and auth.get('token'):
+        # TODO: Validate token and store user_id
+        # For now, allow connection
+        pass
+    return True
+
+@sio.on('disconnect')
+async def disconnect(sid):
+    """Handle client disconnection"""
+    logger.info(f'Client disconnected: {sid}')
+
+@sio.on('subscribe_positions')
+async def subscribe_positions(sid, data, callback=None):
+    """Subscribe to position updates for a user"""
+    user_id = data.get('user_id')
+    if user_id:
+        sio.enter_room(sid, f'positions:{user_id}')
+        logger.info(f'Client {sid} subscribed to positions for user {user_id}')
+        response = {'success': True, 'room': f'positions:{user_id}'}
+        if callback:
+            await callback(response)
+        return response
+    response = {'success': False, 'error': 'user_id required'}
+    if callback:
+        await callback(response)
+    return response
+
+@sio.on('unsubscribe_positions')
+async def unsubscribe_positions(sid, data, callback=None):
+    """Unsubscribe from position updates"""
+    user_id = data.get('user_id')
+    if user_id:
+        sio.leave_room(sid, f'positions:{user_id}')
+        logger.info(f'Client {sid} unsubscribed from positions for user {user_id}')
+        response = {'success': True}
+        if callback:
+            await callback(response)
+        return response
+    response = {'success': False, 'error': 'user_id required'}
+    if callback:
+        await callback(response)
+    return response
+
+# Create Socket.IO ASGI app wrapper
+socket_app = socketio.ASGIApp(sio, app)
+
+# Export socket_app as the main app for uvicorn
+# This allows Socket.IO to work alongside FastAPI
+# Use: uvicorn app.main:socket_app --reload
+# Or keep using app if Socket.IO is not needed: uvicorn app.main:app --reload

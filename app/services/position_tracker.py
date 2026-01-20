@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
 
 from app.modules.positions.models import Position, PositionStatus, PositionSide, PositionUpdate
 from app.modules.flows.models import FlowStatus
@@ -19,6 +20,7 @@ from app.integrations.wallets.factory import create_wallet_from_db
 from app.modules.ai_agents.monitor_agent import MonitorAgent
 from app.services.signal_aggregator import get_signal_aggregator
 from app.services.websocket_manager import get_websocket_manager
+from app.integrations.market_data.binance_client import BinanceClient
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -109,6 +111,27 @@ class PositionTrackerService:
             # Check stop loss/take profit
             await self.check_stop_loss_take_profit(position)
             
+            # Emit Socket.IO update
+            try:
+                # Import here to avoid circular import
+                import sys
+                if 'app.main' in sys.modules:
+                    from app.main import sio
+                    await sio.emit('position_update', {
+                        'position_id': str(position.id),
+                        'user_id': str(position.user_id),
+                        'symbol': position.symbol,
+                        'side': position.side.value,
+                        'current_price': float(current_price),
+                        'current_value': float(position.current["value"]),
+                        'unrealized_pnl': float(position.current["unrealized_pnl"]),
+                        'unrealized_pnl_percent': float(position.current["unrealized_pnl_percent"]),
+                        'risk_level': position.current.get("risk_level", "medium"),
+                        'last_updated': position.current["last_updated"].isoformat() if isinstance(position.current.get("last_updated"), datetime) else None
+                    }, room=f'positions:{position.user_id}')
+            except Exception as e:
+                logger.warning(f"Failed to emit position update via Socket.IO: {e}")
+            
             return {
                 "success": True,
                 "position_id": str(position.id),
@@ -136,13 +159,144 @@ class PositionTrackerService:
             Dict with monitoring result
         """
         try:
-            # Get position
-            position = await Position.get(position_id)
+            try:
+                position = await Position.get(position_id)
+            except Exception as e:
+                logger.warning(f"Beanie get failed for position {position_id}: {e}")
+                position = None
             
             if not position:
+                doc = await self.db["positions"].find_one({"_id": ObjectId(position_id), "deleted_at": None})
+                if not doc:
+                    return {
+                        "success": False,
+                        "error": "Position not found"
+                    }
+
+                status = doc.get("status")
+                if status not in {PositionStatus.OPEN.value, PositionStatus.OPENING.value}:
+                    return {
+                        "success": True,
+                        "message": "Position is not open",
+                        "status": status
+                    }
+
+                symbol = doc.get("symbol")
+                current_price = None
+
+                user_wallet_id = doc.get("user_wallet_id")
+                if user_wallet_id:
+                    try:
+                        wallet_instance = await create_wallet_from_db(self.db, str(user_wallet_id))
+                        current_price = await wallet_instance.get_market_price(symbol)
+                    except Exception as e:
+                        logger.warning(f"Failed to get price from wallet for position {position_id}: {e}")
+
+                if current_price is None:
+                    async with BinanceClient() as binance_client:
+                        current_price = await binance_client.get_price(symbol)
+                        if current_price is None:
+                            return {
+                                "success": False,
+                                "error": "Failed to get market price"
+                            }
+
+                entry = doc.get("entry", {})
+                entry_price = Decimal(str(entry.get("price", 0)))
+                entry_amount = Decimal(str(entry.get("amount", 0)))
+                entry_value = Decimal(str(entry.get("value", 0)))
+                entry_fees = Decimal(str(entry.get("fees", 0)))
+
+                current_price = Decimal(str(current_price))
+                current_value = entry_amount * current_price
+                if doc.get("side") == PositionSide.LONG.value:
+                    unrealized_pnl = (current_price - entry_price) * entry_amount
+                else:
+                    unrealized_pnl = (entry_price - current_price) * entry_amount
+                unrealized_pnl -= entry_fees
+                unrealized_pnl_percent = (unrealized_pnl / entry_value * 100) if entry_value > 0 else Decimal("0")
+
+                current = doc.get("current") or {}
+                high_water_mark = Decimal(str(current.get("high_water_mark", current_price)))
+                low_water_mark = Decimal(str(current.get("low_water_mark", current_price)))
+                high_water_mark = max(high_water_mark, current_price)
+                low_water_mark = min(low_water_mark, current_price)
+                max_drawdown_percent = Decimal("0")
+                if high_water_mark > 0:
+                    max_drawdown_percent = (high_water_mark - low_water_mark) / high_water_mark * Decimal("100")
+
+                def _risk_level(pnl_percent: Decimal) -> str:
+                    if pnl_percent < Decimal("-10"):
+                        return "critical"
+                    if pnl_percent < Decimal("-5"):
+                        return "high"
+                    if pnl_percent < Decimal("-2"):
+                        return "medium"
+                    if pnl_percent < Decimal("0"):
+                        return "low"
+                    return "low"
+
+                now = datetime.now(timezone.utc)
+                opened_at = doc.get("opened_at")
+                time_held_minutes = current.get("time_held_minutes", 0)
+                if isinstance(opened_at, datetime):
+                    if opened_at.tzinfo is None:
+                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    time_held_minutes = int((now - opened_at).total_seconds() / 60)
+                current_update = {
+                    "price": float(current_price),
+                    "value": float(current_value),
+                    "unrealized_pnl": float(unrealized_pnl),
+                    "unrealized_pnl_percent": float(unrealized_pnl_percent),
+                    "risk_level": _risk_level(unrealized_pnl_percent),
+                    "time_held_minutes": time_held_minutes,
+                    "high_water_mark": float(high_water_mark),
+                    "low_water_mark": float(low_water_mark),
+                    "max_drawdown_percent": float(max_drawdown_percent),
+                    "last_updated": now,
+                }
+
+                await self.db["positions"].update_one(
+                    {"_id": doc.get("_id")},
+                    {
+                        "$set": {
+                            "current": current_update,
+                            "updated_at": now,
+                        }
+                    },
+                )
+
+                try:
+                    import sys
+                    if "app.main" in sys.modules:
+                        from app.main import sio
+                        user_id_str = str(doc.get("user_id"))
+                        room = f"positions:{user_id_str}"
+                        update_data = {
+                            "position_id": str(doc.get("_id")),
+                            "user_id": user_id_str,
+                            "symbol": symbol,
+                            "side": doc.get("side"),
+                            "current_price": float(current_price),
+                            "current_value": float(current_value),
+                            "unrealized_pnl": float(unrealized_pnl),
+                            "unrealized_pnl_percent": float(unrealized_pnl_percent),
+                            "risk_level": current_update["risk_level"],
+                            "last_updated": now.isoformat(),
+                        }
+                        logger.info(f"Emitting position_update to room {room} for position {doc.get('_id')}")
+                        await sio.emit("position_update", update_data, room=room)
+                        logger.debug(f"Position update emitted: {update_data}")
+                except Exception as e:
+                    logger.error(f"Failed to emit position update via Socket.IO: {e}", exc_info=True)
+
                 return {
-                    "success": False,
-                    "error": "Position not found"
+                    "success": True,
+                    "position_id": str(doc.get("_id")),
+                    "current_price": float(current_price),
+                    "unrealized_pnl": float(unrealized_pnl),
+                    "unrealized_pnl_percent": float(unrealized_pnl_percent),
+                    "risk_level": current_update["risk_level"],
                 }
             
             if not position.is_open():
@@ -152,14 +306,27 @@ class PositionTrackerService:
                     "status": position.status.value
                 }
             
-            # Get current price from market
-            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
-            current_price = await wallet_instance.get_market_price(position.symbol)
+            current_price = None
+            
+            if position.user_wallet_id:
+                try:
+                    wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+                    current_price = await wallet_instance.get_market_price(position.symbol)
+                except Exception as e:
+                    logger.warning(f"Failed to get price from wallet for position {position_id}: {e}")
+            
+            if current_price is None:
+                async with BinanceClient() as binance_client:
+                    current_price = await binance_client.get_price(position.symbol)
+                    if current_price is None:
+                        return {
+                            "success": False,
+                            "error": "Failed to get market price"
+                        }
             
             # Update position
             result = await self.update_position_price(str(position.id), current_price)
 
-            # Enrich monitoring with sentiment + AI re-evaluation
             try:
                 base_symbol = position.symbol.split("/")[0] if "/" in position.symbol else position.symbol
                 signal_data = (await self.signal_aggregator.get_signal(base_symbol.upper())).to_dict()
@@ -199,14 +366,18 @@ class PositionTrackerService:
 
                 await self._apply_ai_recommendations(position, monitor_result)
 
-                # Automated close based on AI recommendation
                 for rec in monitor_result.get("recommendations", []):
                     if rec.get("position_id") == str(position.id) and rec.get("action") in ["close", "exit"]:
-                        await self._close_position_with_order(
-                            position=position,
-                            wallet=wallet_instance,
-                            reason=rec.get("reason", "ai_signal"),
-                        )
+                        if position.user_wallet_id:
+                            try:
+                                wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+                                await self._close_position_with_order(
+                                    position=position,
+                                    wallet=wallet_instance,
+                                    reason=rec.get("reason", "ai_signal"),
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to close position via wallet: {e}")
                         break
             except Exception as e:
                 logger.error(f"AI monitoring failed for position {position_id}: {str(e)}")
@@ -228,24 +399,34 @@ class PositionTrackerService:
             Dict with monitoring results
         """
         try:
-            # Get all open positions
-            positions = await Position.find(
-                Position.status == PositionStatus.OPEN,
-                Position.deleted_at == None
-            ).to_list()
+            position_ids: List[str] = []
+            try:
+                positions = await Position.find(
+                    Position.status == PositionStatus.OPEN,
+                    Position.deleted_at == None
+                ).to_list()
+                position_ids = [str(position.id) for position in positions]
+            except Exception as e:
+                logger.warning(f"Beanie query failed, using raw MongoDB: {e}")
+                cursor = self.db["positions"].find({
+                    "status": PositionStatus.OPEN.value,
+                    "deleted_at": None,
+                })
+                docs = await cursor.to_list(length=None)
+                position_ids = [str(doc.get("_id")) for doc in docs if doc.get("_id")]
             
             results = {
                 "success": True,
-                "total_positions": len(positions),
+                "total_positions": len(position_ids),
                 "updated": 0,
                 "errors": 0,
                 "details": []
             }
             
             # Monitor each position
-            for position in positions:
+            for position_id in position_ids:
                 try:
-                    result = await self.monitor_position(str(position.id))
+                    result = await self.monitor_position(position_id)
                     
                     if result["success"]:
                         results["updated"] += 1
@@ -253,15 +434,14 @@ class PositionTrackerService:
                         results["errors"] += 1
                     
                     results["details"].append({
-                        "position_id": str(position.id),
-                        "symbol": position.symbol,
+                        "position_id": position_id,
                         "result": result
                     })
                 
                 except Exception as e:
                     results["errors"] += 1
                     results["details"].append({
-                        "position_id": str(position.id),
+                        "position_id": position_id,
                         "error": str(e)
                     })
             
@@ -731,5 +911,3 @@ async def get_position_tracker(db: AsyncIOMotorDatabase) -> PositionTrackerServi
         _position_tracker = PositionTrackerService(db)
     
     return _position_tracker
-
-

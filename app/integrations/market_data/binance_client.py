@@ -9,6 +9,7 @@ Last Updated: 2026-01-17
 """
 
 import aiohttp
+import asyncio
 from typing import List, Dict, Optional, Any
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -183,6 +184,8 @@ class BinanceClient:
                 logger.debug(f"Fetched {len(candles)} candles for {symbol}")
                 return candles
                 
+        except asyncio.CancelledError:
+            raise
         except aiohttp.ClientError as e:
             logger.error(f"Binance API fetch error: {str(e)}")
             return []
@@ -221,6 +224,8 @@ class BinanceClient:
                     volume_24h=Decimal(data["quoteVolume"]),
                 )
                 
+        except asyncio.CancelledError:
+            raise
         except aiohttp.ClientError as e:
             logger.error(f"Binance API fetch error: {str(e)}")
             return None
@@ -249,6 +254,8 @@ class BinanceClient:
                 data = await response.json()
                 return Decimal(data["price"])
                 
+        except asyncio.CancelledError:
+            raise
         except aiohttp.ClientError as e:
             logger.error(f"Binance price fetch error: {str(e)}")
             return None
@@ -290,6 +297,8 @@ class BinanceClient:
                 
                 return result
                 
+        except asyncio.CancelledError:
+            raise
         except aiohttp.ClientError as e:
             logger.error(f"Binance tickers fetch error: {str(e)}")
             return []

@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     # Celery (for background tasks and scheduled flows)
     CELERY_BROKER_URL: str = Field(default="", description="Celery broker URL (defaults to REDIS_URL)")
     CELERY_RESULT_BACKEND: str = Field(default="", description="Celery result backend (defaults to REDIS_URL)")
+
+    # Position monitoring (Socket.IO push)
+    POSITION_MONITOR_ENABLED: bool = Field(default=True)
+    POSITION_MONITOR_INTERVAL_SECONDS: int = Field(default=5)
     
     # Sentiment API Keys (optional, for signal aggregation)
     TWITTER_BEARER_TOKEN: str = Field(default="", description="X/Twitter API Bearer Token")
@@ -233,4 +237,3 @@ except Exception as e:
     print(f"Warning: Could not load settings: {str(e)}")
     print("Please create .env file with required configuration")
     settings = None  # type: ignore
-

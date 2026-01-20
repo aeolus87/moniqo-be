@@ -88,8 +88,68 @@ async def create_order(
         
         logger.info(f"Order {order.id} created for user {user_id}")
         
-        # TODO: Place order on exchange
-        # For now, order is just created in database
+        # Place order on exchange/wallet
+        try:
+            wallet = await create_wallet_from_db(db, str(order.user_wallet_id))
+            
+            # Execute order immediately for MARKET orders, or prepare for LIMIT orders
+            if order.order_type == OrderType.MARKET:
+                order_result = await wallet.place_order(
+                    symbol=order.symbol,
+                    side=order.side,
+                    order_type=order.order_type,
+                    quantity=order.requested_amount,
+                    price=order.limit_price,
+                    stop_price=order.stop_price,
+                    time_in_force=order.time_in_force,
+                )
+                
+                if order_result.get("success", True):
+                    # Update order with execution details
+                    order.external_order_id = order_result.get("order_id")
+                    order.submitted_at = datetime.now(timezone.utc)
+                    
+                    filled_quantity = order_result.get("filled_quantity") or Decimal("0")
+                    if filled_quantity > 0:
+                        order.filled_amount = filled_quantity
+                        order.remaining_amount = order.requested_amount - filled_quantity
+                        order.average_fill_price = Decimal(str(order_result.get("average_price", order_result.get("price", 0))))
+                        order.total_fees = Decimal(str(order_result.get("fee", 0)))
+                        order.first_fill_at = datetime.now(timezone.utc)
+                        order.last_fill_at = datetime.now(timezone.utc)
+                        
+                        if filled_quantity >= order.requested_amount:
+                            await order.update_status(OrderStatus.FILLED, "Order filled completely")
+                        else:
+                            await order.update_status(OrderStatus.PARTIALLY_FILLED, "Order partially filled")
+                    else:
+                        await order.update_status(OrderStatus.OPEN, "Order placed on exchange")
+                else:
+                    await order.update_status(OrderStatus.REJECTED, order_result.get("error", "Order placement failed"))
+            else:
+                # LIMIT/STOP orders - place but don't execute immediately
+                order_result = await wallet.place_order(
+                    symbol=order.symbol,
+                    side=order.side,
+                    order_type=order.order_type,
+                    quantity=order.requested_amount,
+                    price=order.limit_price,
+                    stop_price=order.stop_price,
+                    time_in_force=order.time_in_force,
+                )
+                
+                if order_result.get("success", True):
+                    order.external_order_id = order_result.get("order_id")
+                    order.submitted_at = datetime.now(timezone.utc)
+                    await order.update_status(OrderStatus.OPEN, "Limit order placed")
+                else:
+                    await order.update_status(OrderStatus.REJECTED, order_result.get("error", "Order placement failed"))
+            
+            await order.save()
+        except Exception as e:
+            logger.error(f"Failed to place order {order.id} on exchange: {str(e)}")
+            await order.update_status(OrderStatus.FAILED, f"Order placement error: {str(e)}")
+            await order.save()
         
         return OrderCreateResponse(
             success=True,
