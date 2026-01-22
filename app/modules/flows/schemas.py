@@ -3,7 +3,6 @@ Flow Schemas
 
 Pydantic schemas for Flow API requests and responses.
 
-Author: Moniqo Team
 Last Updated: 2026-01-17
 """
 
