@@ -1197,9 +1197,6 @@ async def execute_flow(
     4. Run RiskManagerAgent
     5. Make final decision
     """
-    # Initialize failed_at to prevent UnboundLocalError
-    failed_at = datetime.now(timezone.utc)
-
     # EXECUTION SAFEGUARD #1: Atomic Lock Acquisition
 
     # Create execution record first (needed for execution_id in lock)
@@ -2403,12 +2400,12 @@ async def execute_flow(
                     error_msg = f"Cannot create position: No user_id available for flow {flow.id}. All fallback methods failed."
                     logger.error(error_msg)
                     # Update execution with error instead of creating orphaned position
+                    # Note: Lock will be released in finally block - no need to release here
                     await update_execution(db, execution.id, {
                         "status": ExecutionStatus.FAILED.value,
                         "completed_at": datetime.now(timezone.utc),
                         "error": error_msg
                     })
-                    await release_execution_lock(db, flow.id, str(execution.id))
                     return execution
                 
                 position_record = {
@@ -2582,6 +2579,8 @@ async def execute_flow(
         logger.error(f"Flow execution failed: {str(e)}")
 
         failed_at = datetime.now(timezone.utc)
+        # Safe fallback for execution_config in case exception occurs before it's defined
+        execution_config = flow.config or {}
 
         # Mark execution as failed - mark all pending steps as failed
         await update_execution(db, execution.id, {

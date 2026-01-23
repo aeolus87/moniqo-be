@@ -19,7 +19,6 @@ from app.integrations.wallets.base import OrderSide, OrderType, TimeInForce
 from app.integrations.wallets.factory import create_wallet_from_db
 from app.modules.ai_agents.monitor_agent import MonitorAgent
 from app.services.signal_aggregator import get_signal_aggregator
-from app.services.websocket_manager import get_websocket_manager
 from app.integrations.market_data.binance_client import BinanceClient
 from app.utils.logger import get_logger
 
@@ -613,45 +612,20 @@ class PositionTrackerService:
     async def _trigger_stop_loss(self, position: Position, current_price: Decimal):
         """Trigger stop loss for position"""
         try:
-            # Create exit order
+            if not position.user_wallet_id:
+                logger.error(f"Cannot trigger stop loss: position {position.id} has no user_wallet_id")
+                return
+            
             wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
             
-            # Place market sell order to close position
-            exit_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
-            entry_amount = Decimal(str(position.entry["amount"]))
-            
-            # Place order (this will be handled by order service)
-            # For now, just close the position
-            await position.close(
-                order_id=position.id,  # TODO: Use actual exit order ID
-                price=current_price,
-                reason="stop_loss",
-                fees=Decimal("0")  # TODO: Calculate actual fees
+            # Use centralized close method which handles order placement, fees, PnL recording, and flow statistics
+            await self._close_position_with_order(
+                position=position,
+                wallet=wallet_instance,
+                reason="Stop Loss Triggered"
             )
             
-            logger.info(f"Stop loss triggered for position {position.id} at {current_price}")
-            
-            # RecordLearning - happens before EndCycle
-            await self._record_learning_outcome(position, "stop_loss")
-            
-            # Update flow statistics with realized P&L (UpdateFlowStats step)
-            # Note: increment_executions=False because execution was already counted when it completed
-            if position.flow_id:
-                try:
-                    from app.modules.flows import service as flow_service
-                    await flow_service._update_flow_statistics(
-                        db=self.db,
-                        flow_id=str(position.flow_id),
-                        position_id=str(position.id),
-                        execution_completed=True,
-                        completed_at=datetime.now(timezone.utc),
-                        increment_executions=False,  # Don't double-count executions
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update flow statistics after stop loss: {e}")
-            
-            # Trigger flow continuation - EndCycle --> WaitTrigger
-            await self._trigger_flow_continuation(str(position.flow_id))
+            logger.info(f"Stop loss triggered for position {position.id}")
         
         except Exception as e:
             logger.error(f"Error triggering stop loss: {str(e)}")
@@ -659,37 +633,20 @@ class PositionTrackerService:
     async def _trigger_take_profit(self, position: Position, current_price: Decimal):
         """Trigger take profit for position"""
         try:
-            # Close position
-            await position.close(
-                order_id=position.id,  # TODO: Use actual exit order ID
-                price=current_price,
-                reason="take_profit",
-                fees=Decimal("0")  # TODO: Calculate actual fees
+            if not position.user_wallet_id:
+                logger.error(f"Cannot trigger take profit: position {position.id} has no user_wallet_id")
+                return
+            
+            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+            
+            # Use centralized close method which handles order placement, fees, PnL recording, and flow statistics
+            await self._close_position_with_order(
+                position=position,
+                wallet=wallet_instance,
+                reason="Take Profit Triggered"
             )
             
-            logger.info(f"Take profit triggered for position {position.id} at {current_price}")
-            
-            # RecordLearning - happens before EndCycle
-            await self._record_learning_outcome(position, "take_profit")
-            
-            # Update flow statistics with realized P&L (UpdateFlowStats step)
-            # Note: increment_executions=False because execution was already counted when it completed
-            if position.flow_id:
-                try:
-                    from app.modules.flows import service as flow_service
-                    await flow_service._update_flow_statistics(
-                        db=self.db,
-                        flow_id=str(position.flow_id),
-                        position_id=str(position.id),
-                        execution_completed=True,
-                        completed_at=datetime.now(timezone.utc),
-                        increment_executions=False,  # Don't double-count executions
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update flow statistics after take profit: {e}")
-            
-            # Trigger flow continuation - EndCycle --> WaitTrigger
-            await self._trigger_flow_continuation(str(position.flow_id))
+            logger.info(f"Take profit triggered for position {position.id}")
         
         except Exception as e:
             logger.error(f"Error triggering take profit: {str(e)}")
@@ -878,6 +835,22 @@ class PositionTrackerService:
             # RecordLearning - happens before EndCycle
             await self._record_learning_outcome(position, f"{reason} (dust)")
             
+            # Update flow statistics with realized P&L (UpdateFlowStats step)
+            # Note: increment_executions=False because execution was already counted when it completed
+            if position.flow_id:
+                try:
+                    from app.modules.flows import service as flow_service
+                    await flow_service._update_flow_statistics(
+                        db=self.db,
+                        flow_id=str(position.flow_id),
+                        position_id=str(position.id),
+                        execution_completed=True,
+                        completed_at=datetime.now(timezone.utc),
+                        increment_executions=False,  # Don't double-count executions
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update flow statistics after dust close: {e}")
+            
             # Trigger flow continuation - EndCycle --> WaitTrigger
             await self._trigger_flow_continuation(str(position.flow_id))
             return
@@ -899,8 +872,9 @@ class PositionTrackerService:
         fee = Decimal(str(order_result.get("fee", 0))) if order_result.get("fee") else Decimal("0")
         fee_currency = order_result.get("fee_currency", "USDT")
 
+        exit_order_id = order_result.get("order_id") or str(position.id)
         await position.close(
-            order_id=position.id,  # TODO: map to real exit order id
+            order_id=exit_order_id,
             price=exit_price,
             reason=reason,
             fees=fee,
