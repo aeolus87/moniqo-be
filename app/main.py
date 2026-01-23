@@ -37,8 +37,19 @@ async def _position_monitor_loop() -> None:
     while True:
         try:
             db = get_database()
-            tracker = await get_position_tracker(db)
-            await tracker.monitor_all_positions()
+
+            # Only monitor if there are actually open positions
+            open_positions_count = await db["positions"].count_documents({
+                "status": "open",
+                "deleted_at": None
+            })
+
+            if open_positions_count > 0:
+                tracker = await get_position_tracker(db)
+                await tracker.monitor_all_positions()
+            else:
+                # Log once per minute instead of every 5 seconds when no positions
+                logger.debug("No open positions to monitor")
         except Exception as e:
             logger.warning(f"Position monitor loop error: {e}")
         await asyncio.sleep(interval)

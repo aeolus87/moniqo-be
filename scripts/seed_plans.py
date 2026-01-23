@@ -8,6 +8,12 @@ Usage:
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Add backend directory to Python path for imports
+backend_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(backend_dir))
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.config.settings import settings
 from app.modules.plans.models import Plan

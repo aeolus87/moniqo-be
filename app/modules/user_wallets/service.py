@@ -71,13 +71,32 @@ async def get_wallet_definitions(
     
     wallets = await db.wallets.find(query).sort("name", 1).to_list(length=100)
     
-    # Convert ObjectId to string
+    # Normalize wallet definitions
+    normalized_wallets = []
     for wallet in wallets:
+        # Convert ObjectId to string
         wallet["id"] = str(wallet.pop("_id"))
+        
+        # Ensure required fields with defaults
+        wallet.setdefault("required_credentials", [])
+        wallet.setdefault("supported_symbols", [])
+        wallet.setdefault("supported_order_types", ["market", "limit"])
+        wallet.setdefault("supports_margin", False)
+        wallet.setdefault("supports_futures", False)
+        wallet.setdefault("description", None)
+        wallet.setdefault("logo_url", None)
+        
+        # Ensure datetime fields are present
+        if "created_at" not in wallet:
+            wallet["created_at"] = datetime.now(timezone.utc)
+        if "updated_at" not in wallet:
+            wallet["updated_at"] = datetime.now(timezone.utc)
+        
+        normalized_wallets.append(wallet)
     
-    logger.debug(f"Found {len(wallets)} wallet definitions")
+    logger.debug(f"Found {len(normalized_wallets)} wallet definitions")
     
-    return wallets
+    return normalized_wallets
 
 
 async def get_wallet_definition(

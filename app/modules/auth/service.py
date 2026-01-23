@@ -28,6 +28,7 @@ from app.core.exceptions import (
 )
 from app.modules.auth import models as auth_models
 from app.modules.auth.schemas import RegisterRequest, LoginRequest, TokenResponse
+from app.modules.roles import models as role_models
 from app.config.settings import settings
 from app.utils.logger import get_logger
 
@@ -73,6 +74,17 @@ async def register_user(
         is_verified=is_verified
     )
     
+    # Find default "User" role
+    user_role = await role_models.find_role_by_name(db, "User")
+    user_role_id = None
+    
+    if user_role:
+        # Convert string ID back to ObjectId for storage
+        user_role_id = ObjectId(user_role["_id"])
+        logger.info(f"Found User role: {user_role_id}")
+    else:
+        logger.warning("Default 'User' role not found. User will be created without a role.")
+    
     # Create user record
     user_record = {
         "auth_id": auth_record["_id"],
@@ -88,7 +100,7 @@ async def register_user(
             "country_code": user_data.phone_number.country_code if user_data.phone_number else None,
             "mobile_number": user_data.phone_number.mobile_number if user_data.phone_number else None
         } if user_data.phone_number else {"country_code": None, "mobile_number": None},
-        "user_role": None,  # Will be set to default "User" role in router/service
+        "user_role": user_role_id,  # Assign default "User" role
         "created_at": auth_record["created_at"],
         "updated_at": auth_record["updated_at"],
         "is_deleted": False

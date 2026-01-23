@@ -25,13 +25,13 @@ class WalletDefinitionResponse(BaseModel):
     integration_type: str = Field(..., description="Integration type")
     is_demo: bool = Field(..., description="Is demo wallet?")
     is_active: bool = Field(..., description="Is active?")
-    required_credentials: List[str] = Field(..., description="Required credential fields")
-    supported_symbols: List[str] = Field(..., description="Supported symbols")
-    supported_order_types: List[str] = Field(..., description="Supported order types")
-    supports_margin: bool = Field(..., description="Supports margin?")
-    supports_futures: bool = Field(..., description="Supports futures?")
-    created_at: datetime
-    updated_at: datetime
+    required_credentials: List[str] = Field(default_factory=list, description="Required credential fields")
+    supported_symbols: List[str] = Field(default_factory=list, description="Supported symbols")
+    supported_order_types: List[str] = Field(default_factory=list, description="Supported order types")
+    supports_margin: bool = Field(default=False, description="Supports margin?")
+    supports_futures: bool = Field(default=False, description="Supports futures?")
+    created_at: Optional[datetime] = Field(None, description="Creation timestamp")
+    updated_at: Optional[datetime] = Field(None, description="Update timestamp")
     
     class Config:
         from_attributes = True
