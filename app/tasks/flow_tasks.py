@@ -9,9 +9,9 @@ Last Updated: 2026-01-17
 
 import asyncio
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Dict, Any
 
-from celery import shared_task
+from celery import shared_task, Task
 from croniter import croniter
 
 from app.utils.logger import get_logger
@@ -153,5 +153,56 @@ def execute_flow_task(flow_id: str, model_provider: str = "groq", model_name: st
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(run())
+    finally:
+        loop.close()
+
+
+@shared_task(name="app.tasks.flow_tasks.heartbeat_running_executions_task", bind=True)
+def heartbeat_running_executions_task(self: Task) -> Dict[str, Any]:
+    """
+    Periodic task to send heartbeat for all running executions.
+    
+    Runs every 5 minutes via Celery beat.
+    Updates lock expiration for active executions.
+    """
+    async def heartbeat_all():
+        from app.config.database import get_database
+        from app.modules.flows.models import ExecutionStatus
+        from app.modules.flows.service import heartbeat_execution_lock
+        
+        db = get_database()
+        
+        # Find all running executions
+        running_executions = await db["executions"].find({
+            "status": ExecutionStatus.RUNNING.value,
+            "deleted_at": None
+        }).to_list(length=None)
+        
+        heartbeat_count = 0
+        failed_count = 0
+        
+        for exec_doc in running_executions:
+            flow_id = exec_doc.get("flow_id")
+            execution_id = str(exec_doc.get("_id"))
+            
+            if flow_id:
+                success = await heartbeat_execution_lock(db, str(flow_id), execution_id)
+                if success:
+                    heartbeat_count += 1
+                else:
+                    failed_count += 1
+        
+        return {
+            "success": True,
+            "heartbeat_count": heartbeat_count,
+            "failed_count": failed_count,
+            "total_running": len(running_executions)
+        }
+    
+    # Run async code
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(heartbeat_all())
     finally:
         loop.close()

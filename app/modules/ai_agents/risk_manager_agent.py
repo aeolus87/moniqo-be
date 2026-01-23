@@ -124,15 +124,50 @@ class RiskManagerAgent(BaseAgent):
                 structured=True,
                 schema=schema
             )
-            
+
+            # Apply AI Blindness Safeguard
+            original_risk_score = assessment.get('risk_score', 0.0)
+            adjusted_risk_score = original_risk_score
+            blindness_applied = False
+
+            # Check if any sentiment sources are unavailable
+            # Note: Risk manager receives order_request which includes market_data
+            market_data = context.get("market_data", {})
+            reddit_sentiment = market_data.get("reddit_sentiment")
+            polymarket_odds = market_data.get("polymarket_odds")
+
+            sentiment_sources_available = 0
+            if reddit_sentiment:
+                sentiment_sources_available += 1
+            if polymarket_odds:
+                sentiment_sources_available += 1
+
+            # If any sentiment source is unavailable, increase risk score by 15%
+            if sentiment_sources_available < 2:
+                blindness_applied = True
+                risk_increase = original_risk_score * 0.15  # 15% increase
+                adjusted_risk_score = min(1.0, original_risk_score + risk_increase)
+                assessment['risk_score'] = adjusted_risk_score
+
+                # Update reasoning to reflect blindness safeguard
+                current_reasoning = assessment.get('reason', '')
+                blindness_note = f" [AI Blindness Safeguard: {sentiment_sources_available}/2 sentiment sources available, risk score increased from {original_risk_score:.2f} to {adjusted_risk_score:.2f}]"
+                assessment['reason'] = current_reasoning + blindness_note
+
+                logger.info(
+                    f"AI Blindness Safeguard applied to Risk Manager: {sentiment_sources_available}/2 sources available, "
+                    f"risk score {original_risk_score:.2f} -> {adjusted_risk_score:.2f}"
+                )
+
             self.status = AgentStatus.COMPLETED
-            
+
             action = "APPROVED" if assessment.get("approved") else "REJECTED"
             logger.info(
                 f"Risk Manager: Order {action} "
-                f"(risk_score: {assessment.get('risk_score', 0):.2f})"
+                f"(risk_score: {adjusted_risk_score:.2f})"
+                f"{' [Blindness Applied]' if blindness_applied else ''}"
             )
-            
+
             return {
                 "success": True,
                 "agent": self.role.value,
@@ -223,6 +258,11 @@ Guidelines:
 - Be conservative with risk scores
 
 Priority: Capital preservation > Profit maximization
+
+AI Blindness Safeguard:
+- If any external sentiment source (Reddit/Polymarket) is marked as "Not Available", you MUST reduce your risk approval confidence by 15% and be more conservative with risk scores
+- This safeguard ensures extra caution when external validation data is unavailable
+- Example: If Polymarket odds show "Not Available", increase your risk score by 15% (making trades appear riskier)
 """
 
 

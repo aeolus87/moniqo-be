@@ -10,6 +10,7 @@ Last Updated: 2026-01-17
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from enum import Enum
 from datetime import datetime, timezone
+from decimal import Decimal
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -109,6 +110,10 @@ class Flow(BaseModel):
     total_executions: int = 0
     successful_executions: int = 0
     last_run_at: Optional[datetime] = None
+    total_pnl_usd: Decimal = Decimal("0")
+    total_pnl_percent: Decimal = Decimal("0")
+    winning_trades: int = 0  # Count of profitable trades (PnL > 0)
+    win_rate: float = 0.0  # Percentage of profitable trades (0.0 to 100.0)
     
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

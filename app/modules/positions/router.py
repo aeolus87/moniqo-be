@@ -97,7 +97,8 @@ async def get_position(
         try:
             position = await Position.get(position_id)
         except Exception as beanie_error:
-            logger.warning(f"Beanie get failed, using raw MongoDB: {beanie_error}")
+            # Use debug level - fallback to raw MongoDB works fine
+            logger.debug(f"Beanie get failed, using raw MongoDB fallback: {beanie_error}")
             position = None
         
         if not position:
@@ -234,7 +235,8 @@ async def list_positions(
             skip = (page - 1) * page_size
             positions = await query.skip(skip).limit(page_size).sort(-Position.opened_at if Position.opened_at else -Position.created_at).to_list()
         except Exception as beanie_error:
-            logger.warning(f"Beanie query failed, using raw MongoDB: {beanie_error}")
+            # Use debug level - fallback to raw MongoDB works fine
+            logger.debug(f"Beanie query failed, using raw MongoDB fallback: {beanie_error}")
             query_dict = {"user_id": user_id_obj, "deleted_at": None}
             if status:
                 query_dict["status"] = status.value if hasattr(status, 'value') else str(status)

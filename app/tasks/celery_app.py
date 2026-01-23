@@ -102,6 +102,13 @@ celery_app.conf.update(
             "schedule": crontab(minute="*"),  # Every minute
             "options": {"queue": "flows"}
         },
+        
+        # Heartbeat running executions every 5 minutes
+        "heartbeat-running-executions": {
+            "task": "app.tasks.flow_tasks.heartbeat_running_executions_task",
+            "schedule": crontab(minute="*/5"),  # Every 5 minutes
+            "options": {"queue": "flows"}
+        },
     }
 )
 

@@ -9,7 +9,7 @@ Last Updated: 2025-11-22
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
@@ -111,26 +111,27 @@ class PositionTrackerService:
             # Check stop loss/take profit
             await self.check_stop_loss_take_profit(position)
             
-            # Emit Socket.IO update
-            try:
-                # Import here to avoid circular import
-                import sys
-                if 'app.main' in sys.modules:
-                    from app.main import sio
-                    await sio.emit('position_update', {
-                        'position_id': str(position.id),
-                        'user_id': str(position.user_id),
-                        'symbol': position.symbol,
-                        'side': position.side.value,
-                        'current_price': float(current_price),
-                        'current_value': float(position.current["value"]),
-                        'unrealized_pnl': float(position.current["unrealized_pnl"]),
-                        'unrealized_pnl_percent': float(position.current["unrealized_pnl_percent"]),
-                        'risk_level': position.current.get("risk_level", "medium"),
-                        'last_updated': position.current["last_updated"].isoformat() if isinstance(position.current.get("last_updated"), datetime) else None
-                    }, room=f'positions:{position.user_id}')
-            except Exception as e:
-                logger.warning(f"Failed to emit position update via Socket.IO: {e}")
+            # Emit Socket.IO update (only if position has user_id)
+            if position.user_id:
+                try:
+                    # Import here to avoid circular import
+                    import sys
+                    if 'app.main' in sys.modules:
+                        from app.main import sio
+                        await sio.emit('position_update', {
+                            'position_id': str(position.id),
+                            'user_id': str(position.user_id),
+                            'symbol': position.symbol,
+                            'side': position.side.value,
+                            'current_price': float(current_price),
+                            'current_value': float(position.current["value"]),
+                            'unrealized_pnl': float(position.current["unrealized_pnl"]),
+                            'unrealized_pnl_percent': float(position.current["unrealized_pnl_percent"]),
+                            'risk_level': position.current.get("risk_level", "medium"),
+                            'last_updated': position.current["last_updated"].isoformat() if isinstance(position.current.get("last_updated"), datetime) else None
+                        }, room=f'positions:{position.user_id}')
+                except Exception as e:
+                    logger.warning(f"Failed to emit position update via Socket.IO: {e}")
             
             return {
                 "success": True,
@@ -162,12 +163,25 @@ class PositionTrackerService:
             try:
                 position = await Position.get(position_id)
             except Exception as e:
-                logger.warning(f"Beanie get failed for position {position_id}: {e}")
+                error_str = str(e).lower()
+                # Don't log warnings for expected errors:
+                # - "not found" / "does not exist" - positions get deleted regularly
+                # - Schema validation errors (e.g., missing user_id) - handled via raw MongoDB fallback
+                if "not found" not in error_str and "does not exist" not in error_str:
+                    # Check if position exists but has schema mismatch (e.g., None user_id)
+                    doc_check = await self.db["positions"].find_one({"_id": ObjectId(position_id)})
+                    if doc_check:
+                        # Position exists but Beanie can't load it - schema mismatch, use debug level
+                        logger.debug(f"Beanie schema mismatch for position {position_id}, using raw MongoDB fallback")
+                    else:
+                        # Position truly doesn't exist
+                        logger.debug(f"Position {position_id} not found in database")
                 position = None
-            
+
             if not position:
                 doc = await self.db["positions"].find_one({"_id": ObjectId(position_id), "deleted_at": None})
                 if not doc:
+                    # Don't log warnings for missing positions - this is normal
                     return {
                         "success": False,
                         "error": "Position not found"
@@ -270,23 +284,54 @@ class PositionTrackerService:
                     import sys
                     if "app.main" in sys.modules:
                         from app.main import sio
-                        user_id_str = str(doc.get("user_id"))
-                        room = f"positions:{user_id_str}"
-                        update_data = {
-                            "position_id": str(doc.get("_id")),
-                            "user_id": user_id_str,
-                            "symbol": symbol,
-                            "side": doc.get("side"),
-                            "current_price": float(current_price),
-                            "current_value": float(current_value),
-                            "unrealized_pnl": float(unrealized_pnl),
-                            "unrealized_pnl_percent": float(unrealized_pnl_percent),
-                            "risk_level": current_update["risk_level"],
-                            "last_updated": now.isoformat(),
-                        }
-                        logger.info(f"Emitting position_update to room {room} for position {doc.get('_id')}")
-                        await sio.emit("position_update", update_data, room=room)
-                        logger.debug(f"Position update emitted: {update_data}")
+                        # Fix: Get user_id from position, or fallback to flow's user_id, or use 'system'
+                        user_id = doc.get("user_id")
+
+                        # If position doesn't have user_id, try to get it from the flow
+                        # and also fix the position document for future queries
+                        if not user_id:
+                            flow_id = doc.get("flow_id")
+                            if flow_id:
+                                try:
+                                    flow_doc = await self.db["flows"].find_one({"_id": ObjectId(flow_id)})
+                                    if flow_doc:
+                                        user_id = flow_doc.get("config", {}).get("user_id") or flow_doc.get("user_id")
+                                        if user_id:
+                                            logger.debug(f"Retrieved user_id {user_id} from flow {flow_id} for position {doc.get('_id')}")
+                                            # Fix the position document for future queries
+                                            try:
+                                                await self.db["positions"].update_one(
+                                                    {"_id": doc.get("_id")},
+                                                    {"$set": {"user_id": ObjectId(str(user_id))}}
+                                                )
+                                                logger.info(f"Fixed missing user_id for position {doc.get('_id')}")
+                                            except Exception as fix_error:
+                                                logger.debug(f"Could not fix user_id for position {doc.get('_id')}: {fix_error}")
+                                except Exception as e:
+                                    logger.debug(f"Failed to get user_id from flow {flow_id}: {e}")
+
+                        # Skip socket emission if no user_id - use debug level since migration script will fix these
+                        if not user_id:
+                            logger.debug(f"Position {doc.get('_id')} has no user_id - skipping socket emission (run migration script to fix)")
+                        else:
+                            user_id_str = str(user_id)
+                            room = f"positions:{user_id_str}"
+
+                            update_data = {
+                                "position_id": str(doc.get("_id")),
+                                "user_id": user_id_str,
+                                "symbol": symbol,
+                                "side": doc.get("side"),
+                                "current_price": float(current_price),
+                                "current_value": float(current_value),
+                                "unrealized_pnl": float(unrealized_pnl),
+                                "unrealized_pnl_percent": float(unrealized_pnl_percent),
+                                "risk_level": current_update["risk_level"],
+                                "last_updated": now.isoformat(),
+                            }
+                            logger.info(f"Emitting position_update to room {room} for position {doc.get('_id')}")
+                            await sio.emit("position_update", update_data, room=room)
+                            logger.debug(f"Position update emitted: {update_data}")
                 except Exception as e:
                     logger.error(f"Failed to emit position update via Socket.IO: {e}", exc_info=True)
 
@@ -407,7 +452,8 @@ class PositionTrackerService:
                 ).to_list()
                 position_ids = [str(position.id) for position in positions]
             except Exception as e:
-                logger.warning(f"Beanie query failed, using raw MongoDB: {e}")
+                # Use debug level - fallback to raw MongoDB works fine
+                logger.debug(f"Beanie query failed, using raw MongoDB fallback: {e}")
                 cursor = self.db["positions"].find({
                     "status": PositionStatus.OPEN.value,
                     "deleted_at": None,
@@ -420,24 +466,34 @@ class PositionTrackerService:
                 "total_positions": len(position_ids),
                 "updated": 0,
                 "errors": 0,
+                "not_found": 0,
+                "closed": 0,
                 "details": []
             }
-            
+
             # Monitor each position
             for position_id in position_ids:
                 try:
                     result = await self.monitor_position(position_id)
-                    
+
                     if result["success"]:
                         results["updated"] += 1
                     else:
-                        results["errors"] += 1
-                    
+                        error_msg = result.get("error", "")
+                        if error_msg == "Position not found":
+                            results["not_found"] += 1
+                            logger.info(f"Position {position_id} not found in DB - removing from monitoring")
+                        elif result.get("message") == "Position is not open":
+                            results["closed"] += 1
+                            logger.debug(f"Position {position_id} is closed - skipping")
+                        else:
+                            results["errors"] += 1
+
                     results["details"].append({
                         "position_id": position_id,
                         "result": result
                     })
-                
+
                 except Exception as e:
                     results["errors"] += 1
                     results["details"].append({
@@ -578,6 +634,22 @@ class PositionTrackerService:
             # RecordLearning - happens before EndCycle
             await self._record_learning_outcome(position, "stop_loss")
             
+            # Update flow statistics with realized P&L (UpdateFlowStats step)
+            # Note: increment_executions=False because execution was already counted when it completed
+            if position.flow_id:
+                try:
+                    from app.modules.flows import service as flow_service
+                    await flow_service._update_flow_statistics(
+                        db=self.db,
+                        flow_id=str(position.flow_id),
+                        position_id=str(position.id),
+                        execution_completed=True,
+                        completed_at=datetime.now(timezone.utc),
+                        increment_executions=False,  # Don't double-count executions
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update flow statistics after stop loss: {e}")
+            
             # Trigger flow continuation - EndCycle --> WaitTrigger
             await self._trigger_flow_continuation(str(position.flow_id))
         
@@ -599,6 +671,22 @@ class PositionTrackerService:
             
             # RecordLearning - happens before EndCycle
             await self._record_learning_outcome(position, "take_profit")
+            
+            # Update flow statistics with realized P&L (UpdateFlowStats step)
+            # Note: increment_executions=False because execution was already counted when it completed
+            if position.flow_id:
+                try:
+                    from app.modules.flows import service as flow_service
+                    await flow_service._update_flow_statistics(
+                        db=self.db,
+                        flow_id=str(position.flow_id),
+                        position_id=str(position.id),
+                        execution_completed=True,
+                        completed_at=datetime.now(timezone.utc),
+                        increment_executions=False,  # Don't double-count executions
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update flow statistics after take profit: {e}")
             
             # Trigger flow continuation - EndCycle --> WaitTrigger
             await self._trigger_flow_continuation(str(position.flow_id))
@@ -705,14 +793,98 @@ class PositionTrackerService:
         wallet,
         reason: str,
     ) -> None:
-        """Place a market order to close the position and persist exit data."""
+        """
+        Place a market order to close the position and persist exit data.
+        
+        Implements "Dust Fix" to handle fee-reduced balances:
+        1. Fetches real available balance from exchange API
+        2. Applies lot-size/step-size rounding
+        3. Checks minimum notional value ($10)
+        4. Handles dust amounts below minimum by closing position without order
+        """
         if not position.is_open():
             return
 
         close_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
-        quantity = Decimal(str(position.entry.get("amount", 0)))
-        if quantity <= 0:
+        
+        # Extract base symbol (e.g., "BTC/USDT" → "BTC")
+        base_symbol = position.symbol.split("/")[0] if "/" in position.symbol else position.symbol
+        
+        # Fetch real available balance from exchange (Dust Fix Step 1)
+        try:
+            available_balance = await wallet.get_balance(base_symbol)
+            logger.info(f"Fetched real balance for {base_symbol}: {available_balance}")
+        except Exception as e:
+            logger.error(f"Failed to fetch balance for {base_symbol}: {e}")
+            # Fallback to database amount if balance fetch fails
+            available_balance = Decimal(str(position.entry.get("amount", 0)))
+        
+        if available_balance <= 0:
+            logger.warning(f"No available balance for {base_symbol}, position may already be closed")
             return
+        
+        # Round quantity to exchange lot-size/step-size (Dust Fix Step 2)
+        if hasattr(wallet, 'format_quantity'):
+            rounded_quantity = wallet.format_quantity(position.symbol, available_balance)
+        else:
+            # Fallback: round down to 8 decimal places (crypto standard)
+            rounded_quantity = available_balance.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        
+        if rounded_quantity <= 0:
+            logger.warning(f"Rounded quantity is 0 for {base_symbol}, skipping order")
+            return
+        
+        # Get current price for minimum notional check (Dust Fix Step 3)
+        try:
+            current_price = await wallet.get_market_price(position.symbol)
+        except Exception as e:
+            logger.error(f"Failed to fetch price for {position.symbol}: {e}")
+            # Use position's current price as fallback
+            current_price = Decimal(str(position.current.get("price", 0)))
+        
+        if current_price <= 0:
+            logger.error(f"Cannot determine current price for {position.symbol}")
+            return
+        
+        # Calculate notional value and check minimum (Dust Fix Step 4)
+        minimum_notional = Decimal("10.00")  # Default $10 minimum (exchange standard)
+        notional_value = rounded_quantity * current_price
+        
+        # Check if dust (below minimum notional) (Dust Fix Step 5)
+        if notional_value < minimum_notional:
+            logger.info(
+                f"Position closed; remaining dust {rounded_quantity} {base_symbol} "
+                f"(${float(notional_value):.2f}) is below exchange minimum ${minimum_notional}"
+            )
+            
+            # Close position without placing order - dust amount too small to trade
+            await position.close(
+                order_id=position.id,
+                price=current_price,
+                reason=f"{reason} (dust below minimum)",
+                fees=Decimal("0"),
+            )
+            
+            await self._record_transaction(
+                position=position,
+                reason=f"{reason} (dust)",
+                price=current_price,
+                fee=Decimal("0"),
+                fee_currency="USDT",
+                order_id=None,
+                status="closed_dust",
+            )
+            
+            # RecordLearning - happens before EndCycle
+            await self._record_learning_outcome(position, f"{reason} (dust)")
+            
+            # Trigger flow continuation - EndCycle --> WaitTrigger
+            await self._trigger_flow_continuation(str(position.flow_id))
+            return
+        
+        # Use real rounded quantity for order (Dust Fix Step 6)
+        quantity = rounded_quantity
+        logger.info(f"Placing close order: {quantity} {base_symbol} (notional: ${float(notional_value):.2f})")
 
         order_result = await wallet.place_order(
             symbol=position.symbol,
@@ -747,6 +919,22 @@ class PositionTrackerService:
         
         # RecordLearning - happens before EndCycle
         await self._record_learning_outcome(position, reason)
+        
+        # Update flow statistics with realized P&L (UpdateFlowStats step)
+        # Note: increment_executions=False because execution was already counted when it completed
+        if position.flow_id:
+            try:
+                from app.modules.flows import service as flow_service
+                await flow_service._update_flow_statistics(
+                    db=self.db,
+                    flow_id=str(position.flow_id),
+                    position_id=str(position.id),
+                    execution_completed=True,
+                    completed_at=datetime.now(timezone.utc),
+                    increment_executions=False,  # Don't double-count executions
+                )
+            except Exception as e:
+                logger.error(f"Failed to update flow statistics after position close: {e}")
         
         # Trigger flow continuation - EndCycle --> WaitTrigger
         await self._trigger_flow_continuation(str(position.flow_id))

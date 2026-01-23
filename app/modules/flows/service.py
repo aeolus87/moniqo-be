@@ -8,7 +8,7 @@ Last Updated: 2026-01-17
 """
 
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from enum import Enum
 import asyncio
@@ -45,6 +45,29 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+async def _emit_execution_update(execution_id: str, flow_id: str, status: str, current_step: int, step_name: str, progress_percent: int, message: str = "", user_id: str = None):
+    """Emit execution update via Socket.IO to notify frontend of progress."""
+    try:
+        # Import here to avoid circular imports
+        from app.main import sio
+
+        # Emit to user's positions room if user_id is provided, otherwise emit globally
+        room = f'positions:{user_id}' if user_id else f'executions:{execution_id}'
+
+        await sio.emit('execution_update', {
+            'execution_id': execution_id,
+            'flow_id': flow_id,
+            'status': status,
+            'current_step': current_step,
+            'step_name': step_name,
+            'progress_percent': progress_percent,
+            'message': message
+        }, room=room)
+        logger.debug(f"Emitted execution_update for execution {execution_id}: step {current_step} ({progress_percent}%) to room {room}")
+    except Exception as e:
+        logger.warning(f"Failed to emit execution update: {e}")
+
+
 # Collection names
 FLOWS_COLLECTION = "flows"
 EXECUTIONS_COLLECTION = "executions"
@@ -54,6 +77,48 @@ ORDERS_COLLECTION = "orders"
 POSITIONS_COLLECTION = "positions"
 AI_CONVERSATIONS_COLLECTION = "ai_conversations"
 LEARNING_OUTCOMES_COLLECTION = "learning_outcomes"
+
+
+# ==================== EXTERNAL SENTIMENT CACHE ====================
+# Simple in-memory cache with timestamps for Reddit and Polymarket data
+# TTL: 15 minutes (900 seconds) to avoid spamming external APIs
+
+_external_sentiment_cache: Dict[str, Tuple[Any, float]] = {}
+EXTERNAL_SENTIMENT_CACHE_TTL = 900  # 15 minutes in seconds
+
+
+def _get_cached_sentiment(key: str) -> Optional[Any]:
+    """
+    Get cached sentiment data if not expired.
+    
+    Args:
+        key: Cache key (e.g., "reddit:BTC" or "polymarket:btc:1h")
+        
+    Returns:
+        Cached data if valid, None if expired or not found
+    """
+    if key in _external_sentiment_cache:
+        data, timestamp = _external_sentiment_cache[key]
+        if (time.time() - timestamp) < EXTERNAL_SENTIMENT_CACHE_TTL:
+            logger.debug(f"Cache hit for {key}")
+            return data
+        else:
+            # Cache expired, remove it
+            del _external_sentiment_cache[key]
+            logger.debug(f"Cache expired for {key}")
+    return None
+
+
+def _set_cached_sentiment(key: str, data: Any) -> None:
+    """
+    Store sentiment data in cache with current timestamp.
+    
+    Args:
+        key: Cache key
+        data: Data to cache
+    """
+    _external_sentiment_cache[key] = (data, time.time())
+    logger.debug(f"Cache set for {key}")
 
 
 async def _get_or_create_demo_user(db: AsyncIOMotorDatabase) -> Optional[str]:
@@ -141,6 +206,146 @@ def _aggregate_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
         "model_provider": usages[0].get("model_provider"),
         "model_name": usages[0].get("model_name"),
     }
+
+
+async def _update_flow_statistics(
+    db: AsyncIOMotorDatabase,
+    flow_id: str,
+    position_id: Optional[str] = None,
+    execution_completed: bool = True,
+    completed_at: Optional[datetime] = None,
+    increment_executions: bool = True,
+) -> None:
+    """
+    Update flow statistics with P&L analytics.
+    
+    This function implements the UpdateFlowStats step from the flowchart.
+    It atomically updates flow statistics including:
+    - total_executions count (if increment_executions=True)
+    - successful_executions count (if increment_executions=True)
+    - total_pnl_usd (from closed positions)
+    - total_pnl_percent (average P&L percentage)
+    - win_rate (percentage of profitable trades)
+    
+    Args:
+        db: Database instance
+        flow_id: Flow ID
+        position_id: Optional position ID to fetch realized P&L from
+        execution_completed: Whether execution completed successfully
+        completed_at: Completion timestamp
+        increment_executions: Whether to increment execution counts (False when called from position close)
+    """
+    try:
+        completed_at = completed_at or datetime.now(timezone.utc)
+        flow_obj_id = ObjectId(flow_id)
+        
+        # Fetch realized P&L from position if provided
+        realized_pnl_usd = Decimal("0")
+        realized_pnl_percent = Decimal("0")
+        is_profitable = False
+        
+        if position_id:
+            try:
+                position_doc = await db[POSITIONS_COLLECTION].find_one({
+                    "_id": ObjectId(position_id),
+                    "flow_id": flow_obj_id,
+                })
+                
+                if position_doc and position_doc.get("exit"):
+                    exit_data = position_doc.get("exit", {})
+                    realized_pnl_usd = Decimal(str(exit_data.get("realized_pnl", 0)))
+                    realized_pnl_percent = Decimal(str(exit_data.get("realized_pnl_percent", 0)))
+                    is_profitable = float(realized_pnl_usd) > 0
+                    logger.debug(f"Fetched P&L from position {position_id}: ${realized_pnl_usd}, {realized_pnl_percent}%")
+            except Exception as e:
+                logger.warning(f"Failed to fetch P&L from position {position_id}: {e}")
+        
+        # Get current flow stats for win_rate calculation
+        flow_doc = await db[FLOWS_COLLECTION].find_one({"_id": flow_obj_id})
+        if not flow_doc:
+            logger.warning(f"Flow {flow_id} not found for stats update")
+            return
+        
+        current_total_executions = flow_doc.get("total_executions", 0)
+        current_successful_executions = flow_doc.get("successful_executions", 0)
+        current_total_pnl_usd = Decimal(str(flow_doc.get("total_pnl_usd", 0)))
+        current_winning_trades = flow_doc.get("winning_trades", 0)  # Track winning trades separately
+        
+        # Prepare update operations
+        update_ops = {
+            "$set": {
+                "last_run_at": completed_at,
+                "updated_at": completed_at,
+            }
+        }
+        
+        # Only increment execution counts if requested (not when called from position close)
+        if increment_executions:
+            update_ops["$inc"] = {
+                "total_executions": 1,
+            }
+            if execution_completed:
+                update_ops["$inc"]["successful_executions"] = 1
+        else:
+            update_ops["$inc"] = {}
+        
+        # Add P&L if position was closed
+        if position_id and realized_pnl_usd != 0:
+            update_ops["$inc"]["total_pnl_usd"] = float(realized_pnl_usd)
+            
+            # Track winning trades for win_rate calculation
+            if is_profitable:
+                update_ops["$inc"]["winning_trades"] = 1
+            
+            # Calculate new total P&L percent (weighted average)
+            new_total_pnl_usd = current_total_pnl_usd + realized_pnl_usd
+            new_total_executions = current_total_executions + 1
+            
+            if new_total_executions > 0:
+                # Average P&L percent across all closed positions
+                # This is a simplified calculation - could be enhanced to track per-position
+                avg_pnl_percent = (new_total_pnl_usd / Decimal(str(new_total_executions)) * Decimal("100")) if new_total_executions > 0 else Decimal("0")
+                # For now, use the latest position's P&L percent as a proxy
+                # A more accurate approach would require tracking all position P&L percentages
+                update_ops["$set"]["total_pnl_percent"] = float(realized_pnl_percent)
+        
+        # Calculate win_rate
+        # If incrementing executions, use new counts; otherwise use current counts
+        if increment_executions:
+            new_successful_executions = current_successful_executions + (1 if execution_completed else 0)
+            new_winning_trades = current_winning_trades + (1 if (is_profitable and execution_completed) else 0)
+        else:
+            # Position close: execution was already counted, just update winning trades if profitable
+            new_successful_executions = current_successful_executions
+            new_winning_trades = current_winning_trades + (1 if is_profitable else 0)
+            if is_profitable:
+                update_ops["$inc"]["winning_trades"] = 1
+        
+        if new_successful_executions > 0:
+            win_rate = (new_winning_trades / new_successful_executions) * 100.0
+            update_ops["$set"]["win_rate"] = round(win_rate, 2)
+        else:
+            update_ops["$set"]["win_rate"] = 0.0
+        
+        # Atomic update
+        await db[FLOWS_COLLECTION].update_one(
+            {"_id": flow_obj_id},
+            update_ops
+        )
+        
+        new_total_executions = current_total_executions + (1 if increment_executions else 0)
+        new_total_pnl = current_total_pnl_usd + realized_pnl_usd
+        
+        logger.info(
+            f"Updated flow {flow_id} stats: "
+            f"executions={new_total_executions}, "
+            f"successful={new_successful_executions}, "
+            f"PnL=${float(new_total_pnl):.2f}, "
+            f"win_rate={update_ops['$set'].get('win_rate', 0):.2f}%"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update flow statistics for {flow_id}: {e}")
 
 
 def _aggregate_swarm_results(
@@ -765,6 +970,215 @@ async def delete_all_executions(
     return result.deleted_count
 
 
+# ==================== EXECUTION LOCK MANAGEMENT ====================
+
+async def acquire_execution_lock(
+    db: AsyncIOMotorDatabase,
+    flow_id: str,
+    execution_id: str
+) -> bool:
+    """
+    Atomically acquire execution lock using find_one_and_update.
+    
+    Returns:
+        True if lock acquired, False if already locked
+    """
+    lock_id = f"flow_lock_{flow_id}"
+    lock_collection = "execution_locks"
+    
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=30)
+    
+    # Check if lock exists and is not expired
+    existing_lock = await db[lock_collection].find_one({"_id": lock_id})
+    if existing_lock:
+        lock_expires = existing_lock.get("expires_at")
+        if lock_expires and isinstance(lock_expires, datetime):
+            # Ensure timezone-aware comparison
+            if lock_expires.tzinfo is None:
+                lock_expires = lock_expires.replace(tzinfo=timezone.utc)
+            if lock_expires >= now:
+                # Lock exists and is not expired
+                logger.debug(f"Lock {lock_id} exists and is not expired (expires at {lock_expires})")
+                return False
+    
+    # Lock doesn't exist or is expired - try to acquire it
+    # Use update_one with upsert=False first to avoid duplicate key errors
+    if existing_lock:
+        # Update expired lock
+        update_result = await db[lock_collection].update_one(
+            {
+                "_id": lock_id,
+                "$or": [
+                    {"expires_at": {"$lt": now}},
+                    {"expires_at": {"$exists": False}}
+                ]
+            },
+            {
+                "$set": {
+                    "flow_id": _to_object_id(flow_id) or flow_id,
+                    "execution_id": execution_id,
+                    "acquired_at": now,
+                    "expires_at": expires_at,
+                    "last_heartbeat": now
+                }
+            }
+        )
+        if update_result.modified_count > 0:
+            return True
+    else:
+        # Lock doesn't exist - create it
+        try:
+            await db[lock_collection].insert_one({
+                "_id": lock_id,
+                "flow_id": _to_object_id(flow_id) or flow_id,
+                "execution_id": execution_id,
+                "acquired_at": now,
+                "expires_at": expires_at,
+                "last_heartbeat": now
+            })
+            return True
+        except Exception as e:
+            # Another process created the lock between our check and insert
+            if "duplicate key" in str(e).lower() or "E11000" in str(e):
+                logger.debug(f"Lock {lock_id} was created by another process")
+                return False
+            raise
+    
+    # If we get here, lock exists but update didn't match (race condition)
+    # Check again if it's still expired
+    final_check = await db[lock_collection].find_one({"_id": lock_id})
+    if final_check:
+        lock_expires = final_check.get("expires_at")
+        if lock_expires and isinstance(lock_expires, datetime):
+            if lock_expires.tzinfo is None:
+                lock_expires = lock_expires.replace(tzinfo=timezone.utc)
+            if lock_expires >= now:
+                return False
+    
+    return False
+
+
+async def heartbeat_execution_lock(
+    db: AsyncIOMotorDatabase,
+    flow_id: str,
+    execution_id: str
+) -> bool:
+    """
+    Update lock expiration time (heartbeat).
+    
+    Returns:
+        True if heartbeat successful, False if lock doesn't match execution_id
+    """
+    lock_id = f"flow_lock_{flow_id}"
+    lock_collection = "execution_locks"
+    
+    now = datetime.now(timezone.utc)
+    new_expires_at = now + timedelta(minutes=30)
+    
+    # Only update if lock matches this execution_id (prevents stealing)
+    result = await db[lock_collection].update_one(
+        {
+            "_id": lock_id,
+            "execution_id": execution_id  # Critical: verify ownership
+        },
+        {
+            "$set": {
+                "expires_at": new_expires_at,
+                "last_heartbeat": now
+            }
+        }
+    )
+    
+    return result.modified_count > 0
+
+
+async def recover_stuck_executions(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
+    """
+    Recover stuck executions on system startup.
+    
+    Finds executions in RUNNING status with expired locks
+    and marks them as FAILED.
+    
+    Returns:
+        Dict with recovery statistics
+    """
+    now = datetime.now(timezone.utc)
+    lock_collection = "execution_locks"
+    
+    # Find all expired locks
+    expired_locks = await db[lock_collection].find({
+        "expires_at": {"$lt": now}
+    }).to_list(length=None)
+    
+    recovered_count = 0
+    
+    for lock in expired_locks:
+        flow_id = lock.get("flow_id")
+        execution_id = lock.get("execution_id")
+        
+        if execution_id:
+            # Check if execution is still RUNNING
+            execution = await db[EXECUTIONS_COLLECTION].find_one({
+                "_id": ObjectId(execution_id),
+                "status": ExecutionStatus.RUNNING.value
+            })
+            
+            if execution:
+                # Mark execution as failed
+                await db[EXECUTIONS_COLLECTION].update_one(
+                    {"_id": ObjectId(execution_id)},
+                    {
+                        "$set": {
+                            "status": ExecutionStatus.FAILED.value,
+                            "completed_at": now,
+                            "error": "Execution marked as stuck: Lock expired (System Restart/Stall)"
+                        }
+                    }
+                )
+                
+                # Clean up lock
+                await db[lock_collection].delete_one({"_id": lock["_id"]})
+                recovered_count += 1
+                logger.info(f"Recovered stuck execution {execution_id} for flow {flow_id}")
+    
+    # Also check for RUNNING executions without locks (orphaned)
+    running_executions = await db[EXECUTIONS_COLLECTION].find({
+        "status": ExecutionStatus.RUNNING.value,
+        "deleted_at": None
+    }).to_list(length=None)
+    
+    orphaned_count = 0
+    for exec_doc in running_executions:
+        flow_id = exec_doc.get("flow_id")
+        execution_id = str(exec_doc.get("_id"))
+        lock_id = f"flow_lock_{flow_id}"
+        
+        # Check if lock exists
+        lock = await db[lock_collection].find_one({"_id": lock_id})
+        
+        if not lock:
+            # Orphaned execution - mark as failed
+            await db[EXECUTIONS_COLLECTION].update_one(
+                {"_id": ObjectId(execution_id)},
+                {
+                    "$set": {
+                        "status": ExecutionStatus.FAILED.value,
+                        "completed_at": now,
+                        "error": "Execution marked as stuck: No lock found (Orphaned execution)"
+                    }
+                }
+            )
+            orphaned_count += 1
+            logger.info(f"Recovered orphaned execution {execution_id} for flow {flow_id}")
+    
+    return {
+        "recovered_expired": recovered_count,
+        "recovered_orphaned": orphaned_count,
+        "total_recovered": recovered_count + orphaned_count
+    }
+
+
 # ==================== FLOW EXECUTION ====================
 
 async def execute_flow(
@@ -775,7 +1189,7 @@ async def execute_flow(
 ) -> Execution:
     """
     Execute a trading flow.
-    
+
     This orchestrates:
     1. Fetch market data
     2. Calculate indicators
@@ -783,8 +1197,37 @@ async def execute_flow(
     4. Run RiskManagerAgent
     5. Make final decision
     """
-    # Create execution record
+    # Initialize failed_at to prevent UnboundLocalError
+    failed_at = datetime.now(timezone.utc)
+
+    # EXECUTION SAFEGUARD #1: Atomic Lock Acquisition
+
+    # Create execution record first (needed for execution_id in lock)
     execution = await create_execution(db, flow)
+    
+    # Atomically acquire lock - only succeeds if lock doesn't exist OR is expired
+    lock_acquired = await acquire_execution_lock(db, flow.id, str(execution.id))
+    
+    if not lock_acquired:
+        # Lock acquisition failed - another execution is running
+        logger.warning(f"Flow {flow.id} is locked by another execution - rejecting duplicate trigger")
+        await update_execution(db, execution.id, {
+            "status": ExecutionStatus.FAILED.value,
+            "completed_at": datetime.now(timezone.utc),
+            "duration": 0,
+            "error": "Execution rejected: Another execution is already running for this flow (idempotency safeguard)"
+        })
+        return execution
+    
+    logger.info(f"Acquired execution lock for flow {flow.id} (execution {execution.id})")
+
+    # Set to RUNNING status
+    await update_execution(db, execution.id, {
+        "status": ExecutionStatus.RUNNING.value,
+        "started_at": datetime.now(timezone.utc)
+    })
+
+    logger.info(f"Idempotency check passed - execution {execution.id} is now running for flow {flow.id}")
     execution_config = flow.config or {}
     # Default to True - bypass gates to ensure AI decisions result in actual trades
     demo_force_position = bool(execution_config.get("demo_force_position", True))
@@ -802,6 +1245,11 @@ async def execute_flow(
             f"steps.{STEP_DATA_FETCH}.status": StepStatus.RUNNING.value,
             f"steps.{STEP_DATA_FETCH}.started_at": datetime.now(timezone.utc),
         })
+        user_id = str((flow.config or {}).get("user_id") or (execution_config or {}).get("user_id"))
+        await _emit_execution_update(
+            execution.id, flow.id, "RUNNING", STEP_DATA_FETCH,
+            "Fetching Market & Sentiment Data", 10, "Loading market data and sentiment analysis...", user_id
+        )
         
         # Step 0: Fetch market data
         binance = get_binance_client()
@@ -842,6 +1290,61 @@ async def execute_flow(
         if signal_data:
             market_context["signal"] = signal_data
         
+        # Fetch Polymarket odds for BTC Price Up markets (with 15-min cache)
+        polymarket_data = None
+        try:
+            from app.integrations.market_data.polymarket_client import get_polymarket_client
+            base_symbol = flow.symbol.split("/")[0] if "/" in flow.symbol else flow.symbol
+            if base_symbol.upper() == "BTC":
+                # Check cache first
+                cache_key_1h = f"polymarket:btc:1h"
+                cache_key_15m = f"polymarket:btc:15m"
+                
+                polymarket_data = _get_cached_sentiment(cache_key_1h)
+                if polymarket_data is None:
+                    polymarket_client = get_polymarket_client()
+                    # Try 1h timeframe first
+                    polymarket_data = await polymarket_client.get_btc_price_up_odds("1h")
+                    if polymarket_data:
+                        _set_cached_sentiment(cache_key_1h, polymarket_data)
+                        logger.info(f"Polymarket 1h data fetched and cached for {flow.symbol}")
+                
+                # Fallback to 15m if 1h not found
+                if polymarket_data is None:
+                    polymarket_data = _get_cached_sentiment(cache_key_15m)
+                    if polymarket_data is None:
+                        polymarket_client = get_polymarket_client()
+                        polymarket_data = await polymarket_client.get_btc_price_up_odds("15m")
+                        if polymarket_data:
+                            _set_cached_sentiment(cache_key_15m, polymarket_data)
+                            logger.info(f"Polymarket 15m data fetched and cached for {flow.symbol}")
+        except Exception as e:
+            logger.error(f"Failed to fetch Polymarket data for {flow.symbol}: {e}")
+        
+        if polymarket_data:
+            market_context["polymarket_odds"] = polymarket_data
+        
+        # Fetch Reddit sentiment for symbol (with 15-min cache)
+        reddit_sentiment = None
+        try:
+            from app.integrations.market_data.reddit_client import get_reddit_client
+            base_symbol = flow.symbol.split("/")[0] if "/" in flow.symbol else flow.symbol
+            cache_key = f"reddit:{base_symbol.upper()}"
+            
+            # Check cache first
+            reddit_sentiment = _get_cached_sentiment(cache_key)
+            if reddit_sentiment is None:
+                reddit_client = get_reddit_client()
+                reddit_sentiment = await reddit_client.get_symbol_sentiment(base_symbol.upper(), limit=10)
+                if reddit_sentiment:
+                    _set_cached_sentiment(cache_key, reddit_sentiment)
+                    logger.info(f"Reddit sentiment fetched and cached for {base_symbol.upper()}")
+        except Exception as e:
+            logger.error(f"Failed to fetch Reddit sentiment for {flow.symbol}: {e}")
+        
+        if reddit_sentiment:
+            market_context["reddit_sentiment"] = reddit_sentiment
+        
         await update_execution(db, execution.id, {
             "market_data": market_context,
             "indicators": indicators,
@@ -849,6 +1352,13 @@ async def execute_flow(
             f"steps.{STEP_DATA_FETCH}.completed_at": datetime.now(timezone.utc),
             f"steps.{STEP_DATA_FETCH}.data": {"candles_count": len(candles)},
         })
+        await _emit_execution_update(
+            execution.id, flow.id, "RUNNING", STEP_MARKET_ANALYSIS,
+            "AI Swarm Analyzing", 30, "Running market analysis with AI agents...", user_id
+        )
+        
+        # Heartbeat: Update lock expiration after data fetch
+        await heartbeat_execution_lock(db, flow.id, str(execution.id))
         
         # Step 1: Market Analysis
         await update_execution(db, execution.id, {
@@ -1046,6 +1556,13 @@ async def execute_flow(
             f"steps.{STEP_MARKET_ANALYSIS}.completed_at": datetime.now(timezone.utc),
             f"steps.{STEP_MARKET_ANALYSIS}.data": analysis_result,
         })
+        await _emit_execution_update(
+            execution.id, flow.id, "RUNNING", STEP_RISK_VALIDATION,
+            "Risk Check Gate", 60, "Evaluating risk parameters and constraints...", user_id
+        )
+        
+        # Heartbeat: Update lock expiration after market analysis
+        await heartbeat_execution_lock(db, flow.id, str(execution.id))
 
         # Phase 2: Pre-trade gate (configurable thresholds + signal alignment)
         pre_trade_config = execution_config
@@ -1275,6 +1792,13 @@ async def execute_flow(
                 f"steps.{STEP_RISK_VALIDATION}.completed_at": completed_at,
                 f"steps.{STEP_RISK_VALIDATION}.data": risk_rules_result,
             })
+            await _emit_execution_update(
+                execution.id, flow.id, "RUNNING", STEP_DECISION,
+                "Placing Order on Exchange", 90, "Executing trade order...", user_id
+            )
+            
+            # Heartbeat: Update lock expiration after risk validation
+            await heartbeat_execution_lock(db, flow.id, str(execution.id))
 
             await update_execution(db, execution.id, {
                 f"steps.{STEP_DECISION}.status": StepStatus.RUNNING.value,
@@ -1610,6 +2134,58 @@ async def execute_flow(
             price_decimal = Decimal(str(price)) if price is not None else None
             stop_decimal = Decimal(str(stop_price)) if stop_price is not None else None
 
+            # EXECUTION SAFEGUARD #2: Price Staleness Check
+            # For real trades, refetch current price and check staleness
+            if not is_simulated:
+                # Refetch current price from exchange
+                fresh_price = None
+                if wallet:
+                    try:
+                        fresh_price = await wallet.get_market_price(flow.symbol)
+                    except Exception as e:
+                        logger.warning(f"Failed to refetch price from wallet: {e}")
+
+                if fresh_price is None:
+                    # Fallback to Binance API
+                    async with BinanceClient() as binance_client:
+                        fresh_price = await binance_client.get_price(flow.symbol)
+
+                if fresh_price is not None:
+                    fresh_price = Decimal(str(fresh_price))
+                    original_price = Decimal(str(current_price))
+
+                    # Calculate price movement percentage
+                    if original_price > 0:
+                        price_change_pct = ((fresh_price - original_price) / original_price) * 100
+
+                        # Check if price moved against us by more than 1%
+                        if final_action == "buy" and price_change_pct > 1.0:
+                            logger.warning(f"Price Staleness: BUY order canceled due to {price_change_pct:.2f}% price increase")
+                            await update_execution(db, execution.id, {
+                                "status": ExecutionStatus.FAILED.value,
+                                "completed_at": datetime.now(timezone.utc),
+                                "duration": int((datetime.now(timezone.utc) - execution.started_at).total_seconds() * 1000),
+                                "error": f"Price Staleness Error: Price increased {price_change_pct:.2f}% from {original_price} to {fresh_price} during analysis - canceling BUY order"
+                            })
+                            raise Exception(f"Price staleness: BUY order canceled due to {price_change_pct:.2f}% price increase")
+
+                        elif final_action == "sell" and price_change_pct < -1.0:
+                            logger.warning(f"Price Staleness: SELL order canceled due to {price_change_pct:.2f}% price decrease")
+                            await update_execution(db, execution.id, {
+                                "status": ExecutionStatus.FAILED.value,
+                                "completed_at": datetime.now(timezone.utc),
+                                "duration": int((datetime.now(timezone.utc) - execution.started_at).total_seconds() * 1000),
+                                "error": f"Price Staleness Error: Price decreased {price_change_pct:.2f}% from {original_price} to {fresh_price} during analysis - canceling SELL order"
+                            })
+                            raise Exception(f"Price staleness: SELL order canceled due to {price_change_pct:.2f}% price decrease")
+
+                        else:
+                            logger.info(f"Price Staleness: Price change {price_change_pct:.2f}% within acceptable range")
+                    else:
+                        logger.warning("Original price is zero or invalid - skipping staleness check")
+                else:
+                    logger.warning("Could not fetch fresh price for staleness check")
+
             # Place real order or simulate
             if is_simulated:
                 # Simulated order - no actual exchange interaction
@@ -1794,12 +2370,13 @@ async def execute_flow(
                             user_id = flow_doc["user_id"]
                             logger.info(f"Retrieved user_id from flow document root: {user_id}")
                 
-                # For demo/simulated positions, use demo user if no user_id found
-                if not user_id and is_simulated:
-                    logger.info("No user_id found for simulated position - using demo user")
+                # Use demo user fallback for ALL positions when user_id is missing
+                # (Previously only applied to simulated positions, causing Beanie errors)
+                if not user_id:
+                    logger.info("No user_id found - attempting to use demo user as fallback")
                     user_id = await _get_or_create_demo_user(db)
                     if user_id:
-                        logger.info(f"Using demo user_id: {user_id} for simulated position")
+                        logger.info(f"Using demo user_id: {user_id} for position")
                         # Update flow config with demo user_id for future executions
                         try:
                             await db[FLOWS_COLLECTION].update_one(
@@ -1820,8 +2397,19 @@ async def execute_flow(
                         logger.error(f"Invalid user_id format: {user_id} - {e}")
                         user_id_obj = None
                 
+                # Validation: Prevent position creation without user_id
+                # This ensures Beanie queries work and positions appear in user lists
                 if not user_id_obj:
-                    logger.error(f"CRITICAL: Position created without user_id - will not appear in user's position list!")
+                    error_msg = f"Cannot create position: No user_id available for flow {flow.id}. All fallback methods failed."
+                    logger.error(error_msg)
+                    # Update execution with error instead of creating orphaned position
+                    await update_execution(db, execution.id, {
+                        "status": ExecutionStatus.FAILED.value,
+                        "completed_at": datetime.now(timezone.utc),
+                        "error": error_msg
+                    })
+                    await release_execution_lock(db, flow.id, str(execution.id))
+                    return execution
                 
                 position_record = {
                     "user_id": user_id_obj,
@@ -1919,6 +2507,9 @@ async def execute_flow(
             f"steps.{STEP_RISK_VALIDATION}.data": risk_result,
         })
         
+        # Heartbeat: Update lock expiration after risk validation
+        await heartbeat_execution_lock(db, flow.id, str(execution.id))
+        
         # Complete decision step
         await update_execution(db, execution.id, {
             f"steps.{STEP_DECISION}.status": StepStatus.RUNNING.value,
@@ -1944,6 +2535,13 @@ async def execute_flow(
             },
             "result": result.model_dump(),
         })
+        await _emit_execution_update(
+            execution.id, flow.id, "COMPLETED", STEP_DECISION,
+            "Placing Order on Exchange", 100, f"Trade {final_action.upper()} executed successfully", user_id
+        )
+        
+        # Heartbeat: Update lock expiration after decision step
+        await heartbeat_execution_lock(db, flow.id, str(execution.id))
 
         learning_record = {
             "user_id": _to_object_id((flow.config or {}).get("user_id")) or (flow.config or {}).get("user_id"),
@@ -1966,37 +2564,38 @@ async def execute_flow(
         }
         await db[LEARNING_OUTCOMES_COLLECTION].insert_one(_to_serializable(learning_record))
         
-        # Update flow statistics
-        await db[FLOWS_COLLECTION].update_one(
-            {"_id": ObjectId(flow.id)},
-            {
-                "$inc": {
-                    "total_executions": 1,
-                    "successful_executions": 1,
-                },
-                "$set": {
-                    "last_run_at": completed_at,
-                    "updated_at": completed_at,
-                },
-            }
+        # Update flow statistics with P&L analytics
+        position_id_str = position_record.get("_id") if position_record else None
+        await _update_flow_statistics(
+            db=db,
+            flow_id=flow.id,
+            position_id=position_id_str,
+            execution_completed=True,
+            completed_at=completed_at,
         )
 
         await _schedule_auto_loop(db, flow, model_provider, model_name)
         # Return updated execution
         return await get_execution_by_id(db, execution.id)
-        
+
     except Exception as e:
         logger.error(f"Flow execution failed: {str(e)}")
-        
+
         failed_at = datetime.now(timezone.utc)
-        
+
         # Mark execution as failed - mark all pending steps as failed
         await update_execution(db, execution.id, {
             "status": ExecutionStatus.FAILED.value,
             "completed_at": failed_at,
         })
+
+        user_id = str((flow.config or {}).get("user_id") or (execution_config or {}).get("user_id"))
+        await _emit_execution_update(
+            execution.id, flow.id, "FAILED", STEP_DECISION,
+            "Execution Failed", 0, f"Flow execution failed: {str(e)}", user_id
+        )
         
-        # Update any running/pending steps to failed
+        # Update any running/pending steps to failed (only on exception)
         for step_idx in [STEP_DATA_FETCH, STEP_MARKET_ANALYSIS, STEP_RISK_VALIDATION, STEP_DECISION]:
             await db[EXECUTIONS_COLLECTION].update_one(
                 {
@@ -2012,7 +2611,39 @@ async def execute_flow(
                 }
             )
         
-        # Update flow statistics
+        # Re-raise after cleanup in finally block
+        raise
+
+    finally:
+        # EXECUTION SAFEGUARD CLEANUP: Always release the lock
+        # Only delete if lock matches this execution_id (prevents deleting wrong lock)
+        try:
+            lock_collection = "execution_locks"
+            lock_id = f"flow_lock_{flow.id}"
+            execution_id_str = str(execution.id) if execution else None
+            
+            if execution_id_str:
+                # Atomic delete: only delete if execution_id matches
+                delete_result = await db[lock_collection].delete_one({
+                    "_id": lock_id,
+                    "execution_id": execution_id_str  # Critical: verify ownership
+                })
+                
+                if delete_result.deleted_count > 0:
+                    logger.info(f"Released execution lock for flow {flow.id} (execution {execution.id})")
+                else:
+                    logger.warning(
+                        f"Lock release failed: Lock {lock_id} doesn't match execution_id {execution_id_str} "
+                        f"(may have been stolen or already released)"
+                    )
+            else:
+                logger.error(f"Cannot release lock: execution.id is None")
+                
+        except Exception as cleanup_error:
+            logger.error(f"Failed to release execution lock for flow {flow.id}: {cleanup_error}")
+            # Don't raise - cleanup failure shouldn't break execution
+        
+        # Update flow statistics (always runs - success or failure)
         await db[FLOWS_COLLECTION].update_one(
             {"_id": ObjectId(flow.id)},
             {
@@ -2023,5 +2654,3 @@ async def execute_flow(
                 },
             }
         )
-        
-        raise

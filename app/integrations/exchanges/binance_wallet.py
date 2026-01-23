@@ -268,6 +268,14 @@ class BinanceWallet(BaseWallet):
                 f"Invalid symbol: {error_msg}"
             )
         
+        # LOT_SIZE filter failure - quantity precision issue
+        if error_code == -1013:
+            raise InvalidOrderError(
+                f"LOT_SIZE filter failure: {error_msg}. "
+                f"This usually means the quantity precision doesn't match the symbol's stepSize. "
+                f"Consider fetching stepSize from /api/v3/exchangeInfo and rounding accordingly."
+            )
+        
         # Generic error
         logger.error(f"Binance API error: {error_code} - {error_msg}")
         raise WalletError(f"Binance API error: {error_msg}")
@@ -563,9 +571,37 @@ class BinanceWallet(BaseWallet):
         return price.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
     
     def format_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
-        """Format quantity to exchange precision"""
-        # TODO: Get actual precision from symbol info
-        # For now, use 8 decimals (crypto standard)
+        """
+        Format quantity to exchange precision using floor rounding.
+        
+        Currently uses 8 decimal places (safe for BTC, ETH, and most major pairs).
+        
+        Future Enhancement:
+        - Some coins (e.g., SHIB, low-sats pairs) have specific LOT_SIZE requirements
+        - If you encounter APIError(code=-1013): Filter failure: LOT_SIZE, implement:
+          1. Fetch stepSize from /api/v3/exchangeInfo endpoint
+          2. Parse LOT_SIZE filter: filters[filterType="LOT_SIZE"]["stepSize"]
+          3. Round quantity: (quantity // stepSize) * stepSize
+          4. Cache symbol info in self._symbol_info_cache for performance
+        
+        Example future implementation:
+            if symbol not in self._symbol_info_cache:
+                info = await self.get_exchange_info(symbol)
+                lot_size = info["symbols"][0]["filters"]["LOT_SIZE"]["stepSize"]
+                self._symbol_info_cache[symbol] = {"stepSize": Decimal(lot_size)}
+            
+            step_size = self._symbol_info_cache[symbol]["stepSize"]
+            return (quantity // step_size) * step_size
+        
+        Args:
+            symbol: Trading pair (e.g., "BTC/USDT")
+            quantity: Quantity to format
+            
+        Returns:
+            Decimal: Floor-rounded quantity (8 decimal precision)
+        """
+        # For now, use 8 decimals (crypto standard) - safe for BTC, ETH, and most pairs
+        # TODO: Fetch actual stepSize from exchangeInfo for coins with special LOT_SIZE requirements
         return quantity.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
     
     # ==================== CONNECTION & INFO ====================

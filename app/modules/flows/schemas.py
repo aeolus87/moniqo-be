@@ -8,7 +8,7 @@ Last Updated: 2026-01-17
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from app.modules.flows.models import (
     FlowStatus,
@@ -46,6 +46,8 @@ class FlowUpdate(BaseModel):
 
 class TriggerFlowRequest(BaseModel):
     """Trigger flow request"""
+    model_config = ConfigDict(protected_namespaces=())
+
     model_provider: str = Field(default="groq", description="AI model provider")
     model_name: Optional[str] = Field(None, description="Specific model name")
 

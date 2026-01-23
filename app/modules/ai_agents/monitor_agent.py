@@ -209,6 +209,11 @@ Guidelines:
 - Mark urgency levels appropriately
 
 Priority: Risk prevention > Profit optimization
+
+AI Blindness Safeguard:
+- If any external sentiment source (Reddit/Polymarket) is marked as "Not Available", you MUST increase your caution level and be more aggressive about recommending position closures or adjustments
+- This safeguard prevents holding positions when external monitoring data is unavailable
+- Be extra vigilant about risk levels and recommend more conservative actions when sentiment data is missing
 """
 
 

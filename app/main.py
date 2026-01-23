@@ -56,9 +56,13 @@ sio = socketio.AsyncServer(
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    
+
     Handles startup and shutdown events.
     """
+    # Setup clean logging on startup
+    from app.core.logger import setup_development_logging
+    setup_development_logging()
+
     # Startup
     logger.info("Starting application...")
     
@@ -73,6 +77,19 @@ async def lifespan(app: FastAPI):
         if getattr(settings, "POSITION_MONITOR_ENABLED", True):
             position_task = asyncio.create_task(_position_monitor_loop())
             app.state.position_monitor_task = position_task
+        
+        # Recover stuck executions on startup
+        try:
+            from app.modules.flows.service import recover_stuck_executions
+            db = get_database()
+            recovery_stats = await recover_stuck_executions(db)
+            if recovery_stats["total_recovered"] > 0:
+                logger.info(
+                    f"Recovered {recovery_stats['total_recovered']} stuck executions on startup: "
+                    f"{recovery_stats['recovered_expired']} expired, {recovery_stats['recovered_orphaned']} orphaned"
+                )
+        except Exception as e:
+            logger.error(f"Failed to recover stuck executions on startup: {e}")
         
         # TODO: Run initialization scripts (Sprint 34)
         

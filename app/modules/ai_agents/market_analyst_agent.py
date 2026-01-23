@@ -122,14 +122,46 @@ class MarketAnalystAgent(BaseAgent):
                 structured=True,
                 schema=schema
             )
-            
+
+            # Apply AI Blindness Safeguard
+            original_confidence = analysis.get('confidence', 0.0)
+            adjusted_confidence = original_confidence
+            blindness_applied = False
+
+            # Check if any sentiment sources are unavailable
+            reddit_sentiment = market_data.get("reddit_sentiment")
+            polymarket_odds = market_data.get("polymarket_odds")
+
+            sentiment_sources_available = 0
+            if reddit_sentiment:
+                sentiment_sources_available += 1
+            if polymarket_odds:
+                sentiment_sources_available += 1
+
+            # If any sentiment source is unavailable, reduce confidence by 15%
+            if sentiment_sources_available < 2:
+                blindness_applied = True
+                adjusted_confidence = original_confidence * 0.85  # Reduce by 15%
+                analysis['confidence'] = adjusted_confidence
+
+                # Update reasoning to reflect blindness safeguard
+                current_reasoning = analysis.get('reasoning', '')
+                blindness_note = f" [AI Blindness Safeguard: {sentiment_sources_available}/2 sentiment sources available, confidence reduced from {original_confidence:.2f} to {adjusted_confidence:.2f}]"
+                analysis['reasoning'] = current_reasoning + blindness_note
+
+                logger.info(
+                    f"AI Blindness Safeguard applied: {sentiment_sources_available}/2 sources available, "
+                    f"confidence {original_confidence:.2f} -> {adjusted_confidence:.2f}"
+                )
+
             self.status = AgentStatus.COMPLETED
-            
+
             logger.info(
                 f"Market Analyst: {symbol} -> {analysis.get('action')} "
-                f"(confidence: {analysis.get('confidence', 0):.2f})"
+                f"(confidence: {adjusted_confidence:.2f})"
+                f"{' [Blindness Applied]' if blindness_applied else ''}"
             )
-            
+
             return {
                 "success": True,
                 "agent": self.role.value,
@@ -175,16 +207,66 @@ Analyze the market for {symbol} and provide a trading recommendation.
         else:
             prompt += "- No indicators provided"
         
+        # Add external social & prediction signals section
+        prompt += "\n\n**External Social & Prediction Signals:**\n"
+        
+        reddit_sentiment = market_data.get("reddit_sentiment")
+        if reddit_sentiment:
+            sentiment = reddit_sentiment.get('sentiment', 'N/A')
+            score = reddit_sentiment.get('sentiment_score', 0)
+            mentions = reddit_sentiment.get('mention_volume', 0)
+            upvotes = reddit_sentiment.get('total_upvotes', 0)
+            posts = reddit_sentiment.get('posts', [])
+            
+            prompt += f"- Reddit Overall: {sentiment} (Score: {score:.2f})\n"
+            prompt += f"- Total Mentions: {mentions} posts, {upvotes} upvotes\n"
+            
+            # Include actual headlines for the AI to analyze
+            if posts:
+                prompt += "- Reddit Headlines (read these to gauge community mood):\n"
+                for i, post in enumerate(posts[:5], 1):
+                    title = post.get('title', 'N/A')
+                    post_upvotes = post.get('upvotes', 0)
+                    selftext = post.get('selftext_preview', '')
+                    prompt += f"  {i}. \"{title}\" ({post_upvotes} upvotes)\n"
+                    if selftext and len(selftext) > 10:
+                        # Truncate selftext for prompt efficiency
+                        preview = selftext[:150] + "..." if len(selftext) > 150 else selftext
+                        prompt += f"     Preview: {preview}\n"
+        else:
+            prompt += "- Reddit Sentiment: Not Available\n"
+        
+        polymarket_odds = market_data.get("polymarket_odds")
+        if polymarket_odds:
+            prob = polymarket_odds.get("probability", 0) * 100
+            tf = polymarket_odds.get("timeframe", "N/A")
+            yes_price = polymarket_odds.get("yes_price", 0) * 100
+            no_price = polymarket_odds.get("no_price", 0) * 100
+            question = polymarket_odds.get("question", "")
+            
+            prompt += f"- Polymarket Prediction Market ({tf} timeframe):\n"
+            prompt += f"  - BTC Price Up Probability: {prob:.1f}%\n"
+            prompt += f"  - Yes: {yes_price:.1f}%, No: {no_price:.1f}%\n"
+            if question:
+                prompt += f"  - Market Question: \"{question}\"\n"
+        else:
+            prompt += "- Polymarket Odds: Not Available\n"
+        
         prompt += """
-
 **Your Task:**
-1. Analyze the current market conditions
-2. Evaluate technical indicators
-3. Assess risk/reward ratio
-4. Provide a clear trading recommendation (buy/sell/hold)
-5. Suggest price targets, stop loss, and take profit levels
+1. Analyze the current market conditions using technical indicators
+2. READ the Reddit headlines above - look for news about hacks, regulations, FUD, or bullish catalysts
+3. Consider Polymarket odds as "smart money" - real money is betting on price direction
+4. Cross-reference technical signals with Reddit sentiment and Polymarket odds
+5. Provide a clear trading recommendation (buy/sell/hold)
+6. Suggest price targets, stop loss, and take profit levels
 
-Be concise but thorough in your analysis.
+**Critical Instructions:**
+- If Reddit headlines mention HACKS, EXPLOITS, or MAJOR NEGATIVE NEWS, strongly consider HOLD regardless of technicals
+- If Polymarket "BTC Up" odds are below 40%, treat this as a strong bearish signal
+- If Polymarket "BTC Up" odds are above 60%, treat this as a strong bullish confirmation
+- Use the headlines to confirm or QUESTION your technical analysis - don't ignore social signals
+- Be concise but thorough in your analysis
 """
         
         return prompt
@@ -199,12 +281,41 @@ Your responsibilities:
 - Assess risk/reward ratios
 - Provide clear, actionable trading recommendations
 - Set appropriate stop-loss and take-profit levels
+- Cross-reference technical indicators with external sentiment signals
 
 Guidelines:
 - Be conservative with confidence scores
 - Always recommend stop-loss and take-profit levels
 - Consider market volatility in your analysis
 - Focus on data-driven decisions, not emotions
+
+External Social & Prediction Signals - READ CAREFULLY:
+1. Reddit Headlines Analysis:
+   - READ the actual Reddit headlines provided - they contain real-time community sentiment
+   - Look for mentions of: hacks, exploits, regulations, FUD, partnerships, adoption news
+   - Headlines mentioning "hack", "exploit", "stolen", "crash" = STRONG SELL/HOLD signal
+   - Headlines mentioning "ATH", "moon", "adoption", "institutional" = bullish confirmation
+   - Use headlines to CONFIRM or QUESTION your technical analysis
+
+2. Polymarket Prediction Market:
+   - Polymarket odds represent REAL MONEY bets on price direction
+   - This is "smart money" - prediction markets often lead price moves by 15-60 minutes
+   - BTC Up odds > 60% = bullish confirmation, increase confidence
+   - BTC Up odds < 40% = bearish warning, reduce confidence or consider HOLD
+   - BTC Up odds 40-60% = neutral, rely more on technicals
+
+3. Cross-Validation Rules:
+   - If technicals and external signals ALIGN: increase confidence by 10%
+   - If technicals and external signals CONFLICT: reduce confidence by 15%, favor HOLD
+   - Never ignore strong external signals just because technicals look favorable
+   - Example: RSI suggests oversold (buy signal) but Reddit shows hack news = HOLD
+
+AI Blindness Safeguard:
+- If any external sentiment source (Reddit/Polymarket) is marked as "Not Available":
+  - REDUCE your trade confidence by 15% automatically
+  - FAVOR HOLD unless technical indicators are overwhelming (RSI < 20 for buys or RSI > 80 for sells)
+  - This prevents overconfidence when external data sources are unavailable
+  - Example: If Reddit shows "Not Available", reduce confidence from 0.8 to 0.68 (0.8 * 0.85)
 """
 
 

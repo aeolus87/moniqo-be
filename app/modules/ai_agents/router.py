@@ -8,7 +8,7 @@ Last Updated: 2025-01-17
 """
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 
@@ -29,6 +29,8 @@ router = APIRouter(prefix="/ai-agents", tags=["AI Agents"])
 
 class MarketAnalysisRequest(BaseModel):
     """Request model for market analysis"""
+    model_config = ConfigDict(protected_namespaces=())
+
     symbol: str = Field(default="BTC/USDT", description="Trading pair symbol")
     current_price: Optional[float] = Field(default=None, description="Current price")
     high_24h: Optional[float] = Field(default=None, description="24h high")

@@ -100,7 +100,7 @@ class BinanceClient:
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
-        logger.info("Binance client initialized")
+        # Removed noisy initialization log - only log once when actually used
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session"""
