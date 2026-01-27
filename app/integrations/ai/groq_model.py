@@ -85,19 +85,41 @@ class GroqModel(BaseLLM):
             api_key: Groq API key
             **kwargs: Additional config
         """
+        # Filter out 'proxies' from kwargs as it's not supported by newer httpx versions
+        # and causes issues with Groq library initialization
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'proxies'}
+        
         super().__init__(
             provider=ModelProvider.GROQ,
             model_name=model_name,
             api_key=api_key,
-            **kwargs
+            **filtered_kwargs
         )
         
         if not api_key:
             raise ModelAuthenticationError("Groq API key is required")
         
         # Initialize Groq client
+        # Note: Only pass api_key explicitly to avoid passing unsupported parameters
+        # The Groq library 0.9.0 has a bug where it tries to pass 'proxies' to httpx,
+        # which newer httpx versions don't support. Updating to groq>=0.27.0 fixes this.
         try:
             self.client = AsyncGroq(api_key=api_key)
+        except TypeError as e:
+            # Catch TypeError specifically for unsupported parameters
+            error_msg = str(e)
+            if 'proxies' in error_msg or 'unexpected keyword' in error_msg:
+                logger.error(
+                    f"Groq client initialization failed due to unsupported parameter. "
+                    f"This is likely due to using groq==0.9.0 with newer httpx. "
+                    f"Please update: pip install 'groq>=0.27.0'. Error: {error_msg}"
+                )
+                raise ModelConnectionError(
+                    f"Failed to initialize Groq: Unsupported parameter detected. "
+                    f"Please update the Groq library: pip install 'groq>=0.27.0'. "
+                    f"Original error: {error_msg}"
+                )
+            raise
         except Exception as e:
             logger.error(f"Failed to initialize Groq client: {str(e)}")
             raise ModelConnectionError(f"Failed to initialize Groq: {str(e)}")

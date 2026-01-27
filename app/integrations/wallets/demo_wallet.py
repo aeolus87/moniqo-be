@@ -39,6 +39,7 @@ from app.integrations.wallets.base import (
 )
 from app.config.database import get_database
 from app.utils.logger import get_logger
+from app.integrations.market_data.binance_client import get_binance_client
 
 logger = get_logger(__name__)
 
@@ -544,15 +545,26 @@ class DemoWallet(BaseWallet):
     
     async def _get_market_price_placeholder(self, symbol: str) -> Optional[Decimal]:
         """
-        Placeholder for market price.
+        Get real market price from Binance API.
         
-        TODO: Replace with actual Polygon.io integration.
+        Falls back to placeholder prices if API call fails.
         """
-        # Placeholder prices for testing
+        # Try to get real price from Binance
+        try:
+            client = get_binance_client()
+            price = await client.get_price(symbol)
+            if price is not None:
+                logger.info(f"Got real Binance price for {symbol}: ${price}")
+                return Decimal(str(price)) if not isinstance(price, Decimal) else price
+        except Exception as e:
+            logger.warning(f"Failed to get price from Binance for {symbol}: {e}")
+        
+        # Fallback to placeholder prices if API fails
+        logger.warning(f"Using fallback placeholder price for {symbol} - Binance API may be unreachable")
         placeholder_prices = {
-            "BTC/USDT": Decimal("50000.00"),
-            "ETH/USDT": Decimal("3000.00"),
-            "BNB/USDT": Decimal("400.00")
+            "BTC/USDT": Decimal("100000.00"),
+            "ETH/USDT": Decimal("3500.00"),
+            "BNB/USDT": Decimal("700.00")
         }
         
         return placeholder_prices.get(symbol)
