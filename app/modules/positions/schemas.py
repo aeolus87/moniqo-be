@@ -69,12 +69,12 @@ class CurrentDataResponse(BaseModel):
     value: Decimal
     unrealized_pnl: Decimal
     unrealized_pnl_percent: Decimal
-    risk_level: str
-    time_held_minutes: int
-    high_water_mark: Decimal
-    low_water_mark: Decimal
-    max_drawdown_percent: Decimal
-    last_updated: datetime
+    risk_level: Optional[str] = None
+    time_held_minutes: Optional[int] = None
+    high_water_mark: Optional[Decimal] = None
+    low_water_mark: Optional[Decimal] = None
+    max_drawdown_percent: Optional[Decimal] = None
+    last_updated: Optional[datetime] = None
 
 
 class RiskManagementResponse(BaseModel):

@@ -33,86 +33,6 @@ class PositionSide(str, Enum):
     SHORT = "short"
 
 
-# ==================== EMBEDDED MODELS ====================
-
-class EntryData(Document):
-    """Position entry data"""
-    order_id: ObjectId
-    timestamp: datetime
-    price: Decimal
-    amount: Decimal
-    value: Decimal  # Notional value
-    leverage: Decimal = Decimal("1")
-    margin_used: Decimal
-    fees: Decimal
-    fee_currency: str
-    market_conditions: Optional[Dict[str, Any]] = None
-    ai_reasoning: Optional[str] = None
-    ai_confidence: Optional[int] = None
-    ai_agent: Optional[str] = None
-    
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    class Settings:
-        arbitrary_types_allowed = True
-
-
-class CurrentData(Document):
-    """Current position state (updated in real-time)"""
-    price: Decimal
-    value: Decimal  # Current notional value
-    unrealized_pnl: Decimal
-    unrealized_pnl_percent: Decimal
-    risk_level: str = "medium"  # "low", "medium", "high", "critical"
-    time_held_minutes: int = 0
-    high_water_mark: Decimal
-    low_water_mark: Decimal
-    max_drawdown_percent: Decimal
-    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    class Settings:
-        arbitrary_types_allowed = True
-
-
-class RiskManagement(Document):
-    """Risk management settings"""
-    initial_stop_loss: Optional[Decimal] = None
-    initial_take_profit: Optional[Decimal] = None
-    current_stop_loss: Optional[Decimal] = None
-    current_take_profit: Optional[Decimal] = None
-    stop_loss_order_id: Optional[ObjectId] = None
-    take_profit_order_id: Optional[ObjectId] = None
-    trailing_stop: Optional[Dict[str, Any]] = None
-    break_even: Optional[Dict[str, Any]] = None
-    
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    class Settings:
-        arbitrary_types_allowed = True
-
-
-class ExitData(Document):
-    """Position exit data"""
-    order_id: ObjectId
-    timestamp: datetime
-    price: Decimal
-    amount: Decimal
-    value: Decimal
-    fees: Decimal
-    fee_currency: str
-    reason: str  # "take_profit", "stop_loss", "manual", "ai_signal", "risk_breach"
-    realized_pnl: Decimal
-    realized_pnl_percent: Decimal
-    time_held_minutes: int
-    
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    class Settings:
-        arbitrary_types_allowed = True
-
-
 # ==================== MAIN POSITION MODEL ====================
 
 class Position(Document):
@@ -195,11 +115,11 @@ class Position(Document):
             "user_id",
             "status",
             "opened_at",
-            ("user_id", "status", "opened_at"),
-            ("user_wallet_id", "status"),
-            ("status", "symbol"),  # For monitoring
+            [("user_id", 1), ("status", 1), ("opened_at", -1)],
+            [("user_wallet_id", 1), ("status", 1)],
+            [("status", 1), ("symbol", 1)],
             "flow_id",
-            ("symbol", "opened_at"),
+            [("symbol", 1), ("opened_at", -1)],
         ]
         arbitrary_types_allowed = True
     
@@ -212,6 +132,10 @@ class Position(Document):
         """
         if self.status != PositionStatus.OPEN:
             return
+        
+        # Ensure current_price is Decimal
+        if not isinstance(current_price, Decimal):
+            current_price = Decimal(str(current_price))
         
         entry_price = Decimal(str(self.entry["price"]))
         entry_amount = Decimal(str(self.entry["amount"]))
@@ -404,8 +328,7 @@ class PositionUpdate(Document):
     class Settings:
         name = "position_updates"
         indexes = [
-            ("position_id", "timestamp"),
-            ("timestamp", 1, {"expireAfterSeconds": 604800}),  # 7 days TTL
+            [("position_id", 1), ("timestamp", -1)],
         ]
         arbitrary_types_allowed = True
 

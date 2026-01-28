@@ -14,7 +14,6 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from enum import Enum
 
-from app.integrations.ai.base import BaseLLM
 from app.integrations.ai.factory import get_model_factory
 from app.utils.logger import get_logger
 
@@ -192,80 +191,9 @@ class BaseAgent(ABC):
             return result
         
         except Exception as e:
-            error_str = str(e).lower()
-            
-            # Check for rate limit errors (429) - fallback to OpenRouter
-            if "429" in str(e) or "rate_limit" in error_str or "rate limit" in error_str:
-                logger.warning(f"{self.role.value} agent hit rate limit on {self.model_provider}, falling back to OpenRouter")
-                
-                try:
-                    result = await self._fallback_analyze(
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        temperature=temperature,
-                        structured=structured,
-                        schema=schema
-                    )
-                    self.status = AgentStatus.IDLE
-                    return result
-                except Exception as fallback_error:
-                    logger.error(f"Fallback to OpenRouter also failed: {fallback_error}")
-                    self.status = AgentStatus.ERROR
-                    raise fallback_error
-            
             self.status = AgentStatus.ERROR
             logger.error(f"{self.role.value} agent analysis failed: {str(e)}")
             raise
-    
-    async def _fallback_analyze(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: float = 0.7,
-        structured: bool = False,
-        schema: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """
-        Fallback analysis using OpenRouter when primary provider hits rate limits.
-        """
-        import os
-        factory = get_model_factory()
-        
-        # Create OpenRouter fallback model
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if not openrouter_key:
-            raise ValueError("OPENROUTER_API_KEY not set - cannot fallback")
-        
-        fallback_model = factory.create_model(
-            provider="openrouter",
-            model_name="meta-llama/llama-3.1-70b-instruct",  # Good fallback model
-            api_key=openrouter_key
-        )
-        
-        logger.info(f"Using OpenRouter fallback for {self.role.value} agent")
-        
-        # Generate response with fallback
-        if structured and schema:
-            result = await fallback_model.generate_structured_output(
-                prompt=prompt,
-                schema=schema,
-                system_prompt=system_prompt,
-                temperature=temperature
-            )
-        else:
-            result = await fallback_model.generate_response(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=temperature
-            )
-        
-        # Track cost from fallback
-        model_info = fallback_model.get_model_info()
-        self.cost_tracking["total_input_tokens"] += model_info["total_input_tokens"]
-        self.cost_tracking["total_output_tokens"] += model_info["total_output_tokens"]
-        self.cost_tracking["total_cost_usd"] += Decimal(str(model_info["total_cost_usd"]))
-        
-        return result
     
     def get_cost_summary(self) -> Dict[str, Any]:
         """Get cost tracking summary"""

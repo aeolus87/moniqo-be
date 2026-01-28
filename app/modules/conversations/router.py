@@ -5,7 +5,7 @@ API endpoints for swarm conversation logs.
 No authentication required for demo.
 """
 
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, Any
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -20,9 +20,24 @@ router = APIRouter(prefix="/conversations", tags=["Conversations"])
 _subscribers: Dict[str, Set[WebSocket]] = {}
 
 
+def _serialize_value(value: Any) -> Any:
+    """Recursively serialize MongoDB types to JSON-compatible types"""
+    if isinstance(value, ObjectId):
+        return str(value)
+    elif isinstance(value, datetime):
+        return value.isoformat()
+    elif isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_serialize_value(item) for item in value]
+    return value
+
+
 def _serialize_conversation(doc: dict) -> dict:
-    doc["id"] = str(doc.pop("_id"))
-    return doc
+    """Serialize a conversation document for JSON response"""
+    if "_id" in doc:
+        doc["id"] = str(doc.pop("_id"))
+    return _serialize_value(doc)
 
 
 @router.get("/{execution_id}")
@@ -31,7 +46,13 @@ async def get_conversation(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Get conversation by execution id"""
+    # Try string first, then ObjectId (for backward compatibility)
     doc = await db["ai_conversations"].find_one({"execution_id": execution_id})
+    if not doc:
+        try:
+            doc = await db["ai_conversations"].find_one({"execution_id": ObjectId(execution_id)})
+        except Exception:
+            pass
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return _serialize_conversation(doc)
@@ -41,17 +62,37 @@ async def get_conversation(
 async def stream_conversation(websocket: WebSocket, execution_id: str):
     await websocket.accept()
     _subscribers.setdefault(execution_id, set()).add(websocket)
+    logger.info(f"[Conversations WS] Client connected for execution: {execution_id}")
 
     try:
-        db = await get_database()
+        db = get_database()
+        # Try string first, then ObjectId (for backward compatibility)
         doc = await db["ai_conversations"].find_one({"execution_id": execution_id})
+        if not doc:
+            try:
+                doc = await db["ai_conversations"].find_one({"execution_id": ObjectId(execution_id)})
+            except Exception:
+                pass
+        
         if doc:
-            await websocket.send_json(_serialize_conversation(doc))
+            logger.info(f"[Conversations WS] Found conversation with {len(doc.get('messages', []))} messages")
+            serialized = _serialize_conversation(doc)
+            await websocket.send_json(serialized)
+        else:
+            logger.info(f"[Conversations WS] No conversation found, sending empty state")
+            await websocket.send_json({"messages": [], "swarm_vote": None})
 
+        # Keep connection alive
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        pass
+        logger.info(f"[Conversations WS] Client disconnected: {execution_id}")
+    except Exception as e:
+        logger.error(f"[Conversations WS] Error: {e}")
+        try:
+            await websocket.close(code=1011, reason=str(e)[:120])
+        except Exception:
+            pass
     finally:
         _subscribers.get(execution_id, set()).discard(websocket)
 
@@ -101,10 +142,15 @@ async def add_message(
     doc = await db["ai_conversations"].find_one({"_id": ObjectId(conversation_id)})
     if doc:
         execution_id = doc.get("execution_id")
-        if execution_id and execution_id in _subscribers:
-            for ws in list(_subscribers[execution_id]):
+        # Also check string version of execution_id in subscribers
+        exec_id_str = str(execution_id) if isinstance(execution_id, ObjectId) else execution_id
+        subscriber_key = exec_id_str if exec_id_str in _subscribers else execution_id
+        
+        if subscriber_key and subscriber_key in _subscribers:
+            serialized_message = _serialize_value(message)
+            for ws in list(_subscribers[subscriber_key]):
                 try:
-                    await ws.send_json({"type": "message", "data": message})
+                    await ws.send_json({"type": "message", "data": serialized_message})
                 except Exception:
-                    _subscribers[execution_id].discard(ws)
+                    _subscribers[subscriber_key].discard(ws)
     return {"success": True}

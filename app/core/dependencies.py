@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from bson import ObjectId
+from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config.database import get_database
 from app.core.security import verify_token
@@ -299,4 +300,33 @@ async def get_current_active_superuser(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Superuser access required"
     )
+
+
+def validate_object_id(id_value: str) -> str:
+    """
+    Validate ObjectId format and raise HTTPException if invalid.
+    
+    Args:
+        id_value: Object ID string to validate
+        
+    Returns:
+        str: Validated Object ID string
+        
+    Raises:
+        HTTPException: If Object ID format is invalid
+        
+    Example:
+        @router.get("/{credentials_id}")
+        async def get_credentials(credentials_id: str = Path(...)):
+            validate_object_id(credentials_id)
+            # ... rest of handler
+    """
+    try:
+        ObjectId(id_value)
+        return id_value
+    except InvalidId:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid ID format: '{id_value}' is not a valid Object ID"
+        )
 

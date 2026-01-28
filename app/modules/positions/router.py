@@ -28,7 +28,6 @@ from app.modules.positions.schemas import (
     ExitDataResponse
 )
 from app.services.position_tracker import get_position_tracker
-from app.integrations.market_data.binance_client import BinanceClient
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,34 +44,6 @@ async def _get_demo_user_id(db) -> Optional[ObjectId]:
         return None
     return user["_id"]
 
-
-def _coerce_entry_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
-    payload = dict(entry or {})
-    order_id = payload.get("order_id")
-    if isinstance(order_id, ObjectId):
-        payload["order_id"] = str(order_id)
-    payload.setdefault("leverage", 1)
-    payload.setdefault("margin_used", payload.get("value", 0))
-    return payload
-
-
-def _coerce_exit_payload(exit: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not exit:
-        return None
-    payload = dict(exit)
-    order_id = payload.get("order_id")
-    if isinstance(order_id, ObjectId):
-        payload["order_id"] = str(order_id)
-    return payload
-
-
-def _coerce_risk_management(risk_management: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    payload = dict(risk_management or {})
-    if payload.get("current_stop_loss") is None and payload.get("stop_loss") is not None:
-        payload["current_stop_loss"] = payload.get("stop_loss")
-    if payload.get("current_take_profit") is None and payload.get("take_profit") is not None:
-        payload["current_take_profit"] = payload.get("take_profit")
-    return payload
 
 
 # ==================== GET POSITION ====================
@@ -93,99 +64,84 @@ async def get_position(
                 raise HTTPException(status_code=401, detail="Not authenticated")
             user_id = demo_user_id
         
-        doc = None
-        try:
-            position = await Position.get(position_id)
-        except Exception as beanie_error:
-            # Use debug level - fallback to raw MongoDB works fine
-            logger.debug(f"Beanie get failed, using raw MongoDB fallback: {beanie_error}")
-            position = None
+        position = await Position.get(position_id)
         
         if not position:
-            doc = await db.positions.find_one({"_id": ObjectId(position_id), "deleted_at": None})
-            if not doc:
-                raise HTTPException(status_code=404, detail="Position not found")
+            raise HTTPException(status_code=404, detail="Position not found")
         
         # Verify position belongs to user
-        if position:
-            if str(position.user_id) != str(user_id):
-                raise HTTPException(status_code=403, detail="Access denied")
-        else:
-            if str(doc.get("user_id")) != str(user_id):
-                raise HTTPException(status_code=403, detail="Access denied")
+        if str(position.user_id) != str(user_id):
+            raise HTTPException(status_code=403, detail="Access denied")
         
-        if position:
-            if position.is_open():
-                # Always update if current is missing or doesn't have price
-                if not position.current or not position.current.get("price"):
-                    needs_update = True
-                else:
-                    last_updated = position.current.get("last_updated")
-                    needs_update = False
-                    
-                    if not last_updated:
-                        needs_update = True
-                    elif isinstance(last_updated, datetime):
-                        if last_updated.tzinfo is None:
-                            last_updated = last_updated.replace(tzinfo=timezone.utc)
-                        time_since_update = (datetime.now(timezone.utc) - last_updated).total_seconds()
-                        if time_since_update > 30:
-                            needs_update = True
-                    else:
-                        needs_update = True
+        if position.is_open():
+            # Always update if current is missing or doesn't have price
+            if not position.current or not position.current.get("price"):
+                needs_update = True
+            else:
+                last_updated = position.current.get("last_updated")
+                needs_update = False
                 
-                if needs_update:
-                    try:
-                        tracker_service = await get_position_tracker(db)
-                        await tracker_service.monitor_position(str(position.id))
-                        await position.reload()
-                    except Exception as e:
-                        logger.warning(f"Failed to update position {position.id} during get: {e}")
+                if not last_updated:
+                    needs_update = True
+                elif isinstance(last_updated, datetime):
+                    if last_updated.tzinfo is None:
+                        last_updated = last_updated.replace(tzinfo=timezone.utc)
+                    time_since_update = (datetime.now(timezone.utc) - last_updated).total_seconds()
+                    if time_since_update > 30:
+                        needs_update = True
+                else:
+                    needs_update = True
             
-            entry_payload = _coerce_entry_payload(position.entry or {})
-            risk_payload = _coerce_risk_management(position.risk_management)
-            exit_payload = _coerce_exit_payload(position.exit)
+            if needs_update:
+                try:
+                    tracker_service = await get_position_tracker(db)
+                    await tracker_service.monitor_position(str(position.id))
+                    await position.reload()
+                except Exception as e:
+                    logger.warning(f"Failed to update position {position.id} during get: {e}")
+        
+        try:
+            entry_data = position.entry or {}
+            entry_dict = dict(entry_data)
+            if "order_id" in entry_dict and isinstance(entry_dict["order_id"], ObjectId):
+                entry_dict["order_id"] = str(entry_dict["order_id"])
+            entry_dict.setdefault("leverage", Decimal("1"))
+            entry_dict.setdefault("margin_used", entry_dict.get("value", Decimal("0")))
+            
+            risk_data = position.risk_management or {}
+            risk_dict = dict(risk_data)
+            if risk_dict.get("current_stop_loss") is None and risk_dict.get("stop_loss") is not None:
+                risk_dict["current_stop_loss"] = risk_dict.get("stop_loss")
+            if risk_dict.get("current_take_profit") is None and risk_dict.get("take_profit") is not None:
+                risk_dict["current_take_profit"] = risk_dict.get("take_profit")
+            
+            exit_dict = None
+            if position.exit:
+                exit_dict = dict(position.exit)
+                if "order_id" in exit_dict and isinstance(exit_dict["order_id"], ObjectId):
+                    exit_dict["order_id"] = str(exit_dict["order_id"])
+            
             return PositionResponse(
                 id=str(position.id),
-                user_id=str(position.user_id),
-                user_wallet_id=str(position.user_wallet_id),
+                user_id=str(position.user_id) if position.user_id else "",
+                user_wallet_id=str(position.user_wallet_id) if position.user_wallet_id else "",
                 flow_id=str(position.flow_id) if position.flow_id else None,
                 symbol=position.symbol,
                 side=position.side.value,
                 status=position.status.value,
-                entry=EntryDataResponse(**entry_payload),
+                entry=EntryDataResponse(**entry_dict),
                 current=CurrentDataResponse(**position.current) if position.current else None,
-                risk_management=RiskManagementResponse(**risk_payload) if position.risk_management else RiskManagementResponse(),
-                exit=ExitDataResponse(**exit_payload) if exit_payload else None,
+                risk_management=RiskManagementResponse(**risk_dict),
+                exit=ExitDataResponse(**exit_dict) if exit_dict else None,
                 statistics=position.statistics,
                 created_at=position.created_at,
                 opened_at=position.opened_at,
                 closed_at=position.closed_at,
                 updated_at=position.updated_at
             )
-
-        entry_payload = _coerce_entry_payload(doc.get("entry") or {})
-        risk_payload = _coerce_risk_management(doc.get("risk_management"))
-        exit_payload = _coerce_exit_payload(doc.get("exit"))
-        user_wallet_id = doc.get("user_wallet_id")
-        return PositionResponse(
-            id=str(doc.get("_id")),
-            user_id=str(doc.get("user_id")),
-            user_wallet_id=str(user_wallet_id) if user_wallet_id else "",
-            flow_id=str(doc.get("flow_id")) if doc.get("flow_id") else None,
-            symbol=doc.get("symbol", ""),
-            side=doc.get("side", ""),
-            status=doc.get("status", ""),
-            entry=EntryDataResponse(**entry_payload),
-            current=CurrentDataResponse(**doc.get("current", {})) if doc.get("current") else None,
-            risk_management=RiskManagementResponse(**risk_payload) if doc.get("risk_management") else RiskManagementResponse(),
-            exit=ExitDataResponse(**exit_payload) if exit_payload else None,
-            statistics=doc.get("statistics", {}),
-            created_at=doc.get("created_at"),
-            opened_at=doc.get("opened_at"),
-            closed_at=doc.get("closed_at"),
-            updated_at=doc.get("updated_at")
-        )
+        except (AttributeError, KeyError) as e:
+            logger.error(f"Position {position_id} has invalid data: {e}")
+            raise HTTPException(status_code=500, detail=f"Position data is corrupted: missing {e}")
     
     except HTTPException:
         raise
@@ -207,7 +163,8 @@ async def list_positions(
 ):
     """List positions for current user (or demo user if not authenticated)"""
     try:
-        if current_user:
+        user_id = None
+        if current_user and "_id" in current_user:
             user_id = current_user["_id"]
         else:
             auth = await db["auth"].find_one({"email": "demo@moniqo.com", "is_deleted": False})
@@ -216,58 +173,43 @@ async def list_positions(
             user = await db["users"].find_one({"auth_id": auth["_id"], "is_deleted": False})
             if not user:
                 return PositionListResponse(positions=[], total=0, page=page, page_size=page_size)
-            user_id = user["_id"]
+            user_id = user.get("_id")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Not authenticated")
         
         user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
         
-        try:
-            query = Position.find(
-                Position.user_id == user_id_obj,
-                Position.deleted_at == None
-            )
-            
-            if status:
-                query = query.find(Position.status == status)
-            if symbol:
-                query = query.find(Position.symbol == symbol)
-            
-            total = await query.count()
-            skip = (page - 1) * page_size
-            positions = await query.skip(skip).limit(page_size).sort(-Position.opened_at if Position.opened_at else -Position.created_at).to_list()
-        except Exception as beanie_error:
-            # Use debug level - fallback to raw MongoDB works fine
-            logger.debug(f"Beanie query failed, using raw MongoDB fallback: {beanie_error}")
-            query_dict = {"user_id": user_id_obj, "deleted_at": None}
-            if status:
-                query_dict["status"] = status.value if hasattr(status, 'value') else str(status)
-            if symbol:
-                query_dict["symbol"] = symbol
-            
-            total = await db.positions.count_documents(query_dict)
-            skip = (page - 1) * page_size
-            cursor = db.positions.find(query_dict).skip(skip).limit(page_size).sort("opened_at", -1)
-            raw_positions = await cursor.to_list(length=page_size)
-            
-            position_responses = []
-            tracker_service = await get_position_tracker(db)
-            
-            for doc in raw_positions:
-                try:
-                    position_status = doc.get("status")
-                    is_open = position_status == PositionStatus.OPEN.value
-                    
-                    if is_open:
-                        current_data = doc.get("current", {})
-                        # Always update if current is missing or doesn't have price
-                        if not current_data or not current_data.get("price"):
+        # Build query filter
+        query_filter = {"user_id": user_id_obj, "deleted_at": None}
+        if status:
+            query_filter["status"] = status.value
+        if symbol:
+            query_filter["symbol"] = symbol
+        
+        query = Position.find(query_filter)
+        total = await query.count()
+        skip = (page - 1) * page_size
+        # Sort by created_at descending (opened_at may be None for some positions)
+        positions = await query.skip(skip).limit(page_size).sort("-created_at").to_list()
+        
+        position_responses = []
+        tracker_service = await get_position_tracker(db)
+        
+        for position in positions:
+            try:
+                if position.is_open():
+                    # Always update if current is missing or doesn't have price
+                    if not position.current or not position.current.get("price"):
+                        needs_update = True
+                    else:
+                        last_updated = position.current.get("last_updated")
+                        needs_update = False
+                        
+                        if not last_updated:
                             needs_update = True
                         else:
-                            last_updated = current_data.get("last_updated")
-                            needs_update = False
-                            
-                            if not last_updated:
-                                needs_update = True
-                            elif isinstance(last_updated, datetime):
+                            if isinstance(last_updated, datetime):
                                 if last_updated.tzinfo is None:
                                     last_updated = last_updated.replace(tzinfo=timezone.utc)
                                 time_since_update = (datetime.now(timezone.utc) - last_updated).total_seconds()
@@ -275,104 +217,57 @@ async def list_positions(
                                     needs_update = True
                             else:
                                 needs_update = True
-                        
-                        if needs_update:
-                            try:
-                                await tracker_service.monitor_position(str(doc.get("_id")))
-                                doc = await db.positions.find_one({"_id": doc.get("_id")})
-                            except Exception as e:
-                                logger.warning(f"Failed to update position {doc.get('_id')} during list: {e}")
                     
-                    entry_payload = _coerce_entry_payload(doc.get("entry") or {})
-                    risk_payload = _coerce_risk_management(doc.get("risk_management"))
-                    exit_payload = _coerce_exit_payload(doc.get("exit"))
-                    user_wallet_id = doc.get("user_wallet_id")
-                    
-                    position_responses.append(
-                        PositionResponse(
-                            id=str(doc.get("_id")),
-                            user_id=str(doc.get("user_id")),
-                            user_wallet_id=str(user_wallet_id) if user_wallet_id else "",
-                            flow_id=str(doc.get("flow_id")) if doc.get("flow_id") else None,
-                            symbol=doc.get("symbol", ""),
-                            side=doc.get("side", ""),
-                            status=doc.get("status", ""),
-                            entry=EntryDataResponse(**entry_payload),
-                            current=CurrentDataResponse(**doc.get("current", {})) if doc.get("current") else None,
-                            risk_management=RiskManagementResponse(**risk_payload) if doc.get("risk_management") else RiskManagementResponse(),
-                            exit=ExitDataResponse(**exit_payload) if exit_payload else None,
-                            statistics=doc.get("statistics", {}),
-                            created_at=doc.get("created_at"),   
-                            opened_at=doc.get("opened_at"),
-                            closed_at=doc.get("closed_at"),
-                            updated_at=doc.get("updated_at")
-                        )
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to convert position doc {doc.get('_id')}: {e}")
-                    continue
-            
-            return PositionListResponse(
-                positions=position_responses,
-                total=total,
-                page=page,
-                page_size=page_size
-            )
-        
-        position_responses = []
-        tracker_service = await get_position_tracker(db)
-        
-        for position in positions:
-            if position.is_open():
-                # Always update if current is missing or doesn't have price
-                if not position.current or not position.current.get("price"):
-                    needs_update = True
-                else:
-                    last_updated = position.current.get("last_updated")
-                    needs_update = False
-                    
-                    if not last_updated:
-                        needs_update = True
-                    else:
-                        if isinstance(last_updated, datetime):
-                            if last_updated.tzinfo is None:
-                                last_updated = last_updated.replace(tzinfo=timezone.utc)
-                            time_since_update = (datetime.now(timezone.utc) - last_updated).total_seconds()
-                            if time_since_update > 30:
-                                needs_update = True
-                        else:
-                            needs_update = True
+                    if needs_update:
+                        try:
+                            await tracker_service.monitor_position(str(position.id))
+                            await position.reload()
+                        except Exception as e:
+                            logger.warning(f"Failed to update position {position.id} during list: {e}")
                 
-                if needs_update:
-                    try:
-                        await tracker_service.monitor_position(str(position.id))
-                        await position.reload()
-                    except Exception as e:
-                        logger.warning(f"Failed to update position {position.id} during list: {e}")
-            
-            entry_payload = _coerce_entry_payload(position.entry or {})
-            risk_payload = _coerce_risk_management(position.risk_management)
-            exit_payload = _coerce_exit_payload(position.exit)
-            position_responses.append(
-                PositionResponse(
-                    id=str(position.id),
-                    user_id=str(position.user_id),
-                    user_wallet_id=str(position.user_wallet_id) if position.user_wallet_id else "",
-                    flow_id=str(position.flow_id) if position.flow_id else None,
-                    symbol=position.symbol,
-                    side=position.side.value if hasattr(position.side, 'value') else str(position.side),
-                    status=position.status.value if hasattr(position.status, 'value') else str(position.status),
-                    entry=EntryDataResponse(**entry_payload),
-                    current=CurrentDataResponse(**position.current) if position.current else None,
-                    risk_management=RiskManagementResponse(**risk_payload) if position.risk_management else RiskManagementResponse(),
-                    exit=ExitDataResponse(**exit_payload) if exit_payload else None,
-                    statistics=position.statistics,
-                    created_at=position.created_at,
-                    opened_at=position.opened_at,
-                    closed_at=position.closed_at,
-                    updated_at=position.updated_at
+                entry_data = position.entry or {}
+                entry_dict = dict(entry_data)
+                if "order_id" in entry_dict and isinstance(entry_dict["order_id"], ObjectId):
+                    entry_dict["order_id"] = str(entry_dict["order_id"])
+                entry_dict.setdefault("leverage", Decimal("1"))
+                entry_dict.setdefault("margin_used", entry_dict.get("value", Decimal("0")))
+                
+                risk_data = position.risk_management or {}
+                risk_dict = dict(risk_data)
+                if risk_dict.get("current_stop_loss") is None and risk_dict.get("stop_loss") is not None:
+                    risk_dict["current_stop_loss"] = risk_dict.get("stop_loss")
+                if risk_dict.get("current_take_profit") is None and risk_dict.get("take_profit") is not None:
+                    risk_dict["current_take_profit"] = risk_dict.get("take_profit")
+                
+                exit_dict = None
+                if position.exit:
+                    exit_dict = dict(position.exit)
+                    if "order_id" in exit_dict and isinstance(exit_dict["order_id"], ObjectId):
+                        exit_dict["order_id"] = str(exit_dict["order_id"])
+                
+                position_responses.append(
+                    PositionResponse(
+                        id=str(position.id),
+                        user_id=str(position.user_id) if position.user_id else "",
+                        user_wallet_id=str(position.user_wallet_id) if position.user_wallet_id else "",
+                        flow_id=str(position.flow_id) if position.flow_id else None,
+                        symbol=position.symbol,
+                        side=position.side.value,
+                        status=position.status.value,
+                        entry=EntryDataResponse(**entry_dict),
+                        current=CurrentDataResponse(**position.current) if position.current else None,
+                        risk_management=RiskManagementResponse(**risk_dict),
+                        exit=ExitDataResponse(**exit_dict) if exit_dict else None,
+                        statistics=position.statistics,
+                        created_at=position.created_at,
+                        opened_at=position.opened_at,
+                        closed_at=position.closed_at,
+                        updated_at=position.updated_at
+                    )
                 )
-            )
+            except (AttributeError, KeyError) as e:
+                logger.warning(f"Skipping malformed position {position.id}: {e}")
+                continue
         
         return PositionListResponse(
             positions=position_responses,
@@ -381,8 +276,10 @@ async def list_positions(
             page_size=page_size
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error listing positions: {str(e)}")
+        logger.error(f"Error listing positions: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -446,9 +343,26 @@ async def update_position(
         
         logger.info(f"Position {position_id} updated by user {user_id}")
         
-        entry_payload = _coerce_entry_payload(position.entry or {})
-        risk_payload = _coerce_risk_management(position.risk_management)
-        exit_payload = _coerce_exit_payload(position.exit)
+        entry_data = position.entry or {}
+        entry_dict = dict(entry_data)
+        if "order_id" in entry_dict and isinstance(entry_dict["order_id"], ObjectId):
+            entry_dict["order_id"] = str(entry_dict["order_id"])
+        entry_dict.setdefault("leverage", Decimal("1"))
+        entry_dict.setdefault("margin_used", entry_dict.get("value", Decimal("0")))
+        
+        risk_data = position.risk_management or {}
+        risk_dict = dict(risk_data)
+        if risk_dict.get("current_stop_loss") is None and risk_dict.get("stop_loss") is not None:
+            risk_dict["current_stop_loss"] = risk_dict.get("stop_loss")
+        if risk_dict.get("current_take_profit") is None and risk_dict.get("take_profit") is not None:
+            risk_dict["current_take_profit"] = risk_dict.get("take_profit")
+        
+        exit_dict = None
+        if position.exit:
+            exit_dict = dict(position.exit)
+            if "order_id" in exit_dict and isinstance(exit_dict["order_id"], ObjectId):
+                exit_dict["order_id"] = str(exit_dict["order_id"])
+        
         return PositionResponse(
             id=str(position.id),
             user_id=str(position.user_id),
@@ -457,10 +371,10 @@ async def update_position(
             symbol=position.symbol,
             side=position.side.value,
             status=position.status.value,
-            entry=EntryDataResponse(**entry_payload),
+            entry=EntryDataResponse(**entry_dict),
             current=CurrentDataResponse(**position.current) if position.current else None,
-            risk_management=RiskManagementResponse(**risk_payload),
-            exit=ExitDataResponse(**exit_payload) if exit_payload else None,
+            risk_management=RiskManagementResponse(**risk_dict),
+            exit=ExitDataResponse(**exit_dict) if exit_dict else None,
             statistics=position.statistics,
             created_at=position.created_at,
             opened_at=position.opened_at,
@@ -494,25 +408,18 @@ async def close_position(
                 raise HTTPException(status_code=401, detail="Not authenticated")
             user_id = demo_user_id
         
-        try:
-            position = await Position.get(position_id)
-            doc = None
-        except Exception:
-            position = None
-            doc = await db.positions.find_one({"_id": ObjectId(position_id), "deleted_at": None})
-            if not doc:
-                raise HTTPException(status_code=404, detail="Position not found")
+        position = await Position.get(position_id)
         
-        position_user_id = str(position.user_id) if position else str(doc.get("user_id"))
-        if position_user_id != str(user_id):
+        if not position:
+            raise HTTPException(status_code=404, detail="Position not found")
+        
+        if str(position.user_id) != str(user_id):
             raise HTTPException(status_code=403, detail="Access denied")
         
-        if position and not position.is_open():
+        if not position.is_open():
             raise HTTPException(status_code=400, detail=f"Position cannot be closed. Current status: {position.status.value}")
-        if doc and doc.get("status") != PositionStatus.OPEN.value:
-            raise HTTPException(status_code=400, detail=f"Position cannot be closed. Current status: {doc.get('status')}")
         
-        entry_data = position.entry if position else (doc.get("entry") or {})
+        entry_data = position.entry
         if not entry_data:
             raise HTTPException(status_code=500, detail="Position entry data missing")
         
@@ -520,26 +427,20 @@ async def close_position(
             entry_price = Decimal(str(entry_data.get("price")))
             entry_amount = Decimal(str(entry_data.get("amount")))
             entry_data["value"] = entry_price * entry_amount
-            if position:
-                position.entry = entry_data
-                await position.save()
-            else:
-                await db.positions.update_one(
-                    {"_id": ObjectId(position_id)},
-                    {"$set": {"entry.value": float(entry_data["value"])}},
-                )
+            position.entry = entry_data
+            await position.save()
 
         tracker_service = await get_position_tracker(db)
         current_price = None
-        user_wallet_id = position.user_wallet_id if position else doc.get("user_wallet_id")
+        user_wallet_id = position.user_wallet_id
         
-        if user_wallet_id and position:
+        if user_wallet_id:
             monitor_result = await tracker_service.monitor_position(str(position.id))
             if monitor_result["success"]:
                 current_price = monitor_result.get("current_price")
         
         if current_price is None:
-            current_data = position.current if position else doc.get("current")
+            current_data = position.current
             current_price = current_data.get("price") if current_data else entry_data.get("price")
         
         if current_price is None:
@@ -548,55 +449,27 @@ async def close_position(
         current_price = Decimal(str(current_price))
         reason = request.reason or "manual_close"
         
-        if position:
-            await position.close(
-                order_id=position.id,
-                price=current_price,
+        await position.close(
+            order_id=position.id,
+            price=current_price,
+            reason=reason,
+            fees=Decimal("0")
+        )
+        try:
+            await tracker_service._record_transaction(
+                position=position,
                 reason=reason,
-                fees=Decimal("0")
+                price=current_price,
+                fee=Decimal("0"),
+                fee_currency="USDT",
+                order_id=None,
+                status="filled",
             )
-            try:
-                await tracker_service._record_transaction(
-                    position=position,
-                    reason=reason,
-                    price=current_price,
-                    fee=Decimal("0"),
-                    fee_currency="USDT",
-                    order_id=None,
-                    status="filled",
-                )
-            except Exception as e:
-                logger.warning(f"Failed to record close transaction for position {position_id}: {e}")
-            
-            realized_pnl = position.exit["realized_pnl"]
-            realized_pnl_percent = position.exit["realized_pnl_percent"]
-        else:
-            exit_data = {
-                "order_id": str(position_id),
-                "timestamp": datetime.now(timezone.utc),
-                "price": float(current_price),
-                "amount": float(entry_data.get("amount", 0)),
-                "value": float(Decimal(str(entry_data.get("amount", 0))) * current_price),
-                "fees": 0.0,
-                "fee_currency": "USDT",
-                "reason": reason,
-                "realized_pnl": 0.0,
-                "realized_pnl_percent": 0.0,
-                "time_held_minutes": 0,
-            }
-            await db.positions.update_one(
-                {"_id": ObjectId(position_id)},
-                {
-                    "$set": {
-                        "status": PositionStatus.CLOSED.value,
-                        "closed_at": datetime.now(timezone.utc),
-                        "updated_at": datetime.now(timezone.utc),
-                        "exit": exit_data,
-                    }
-                },
-            )
-            realized_pnl = exit_data.get("realized_pnl", 0)
-            realized_pnl_percent = exit_data.get("realized_pnl_percent", 0)
+        except Exception as e:
+            logger.warning(f"Failed to record close transaction for position {position_id}: {e}")
+        
+        realized_pnl = position.exit["realized_pnl"]
+        realized_pnl_percent = position.exit["realized_pnl_percent"]
         
         logger.info(f"Position {position_id} closed by user {user_id}")
         

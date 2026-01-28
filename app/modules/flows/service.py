@@ -2,9 +2,10 @@
 Flow Service
 
 Business logic for flow management and execution.
+Refactored to use modular services for better maintainability.
 
 Author: Moniqo Team
-Last Updated: 2026-01-17
+Last Updated: 2026-01-28
 """
 
 from typing import List, Optional, Dict, Any, Tuple
@@ -42,30 +43,45 @@ from app.modules.ai_agents.risk_manager_agent import RiskManagerAgent
 from app.modules.risk_rules import service as risk_rule_service
 from app.utils.logger import get_logger
 
+# Import from refactored service modules
+from app.modules.flows.utils import (
+    to_object_id as _to_object_id,
+    to_serializable as _to_serializable,
+    to_response_payload as _to_response_payload,
+    get_or_create_demo_user as _get_or_create_demo_user,
+    resolve_order_quantity as _resolve_order_quantity,
+    resolve_demo_force_action as _resolve_demo_force_action,
+)
+# Note: execution_service.py contains equivalent functions but we keep local
+# implementations here to maintain backward compatibility with existing imports
+from app.modules.flows.execution_lock import (
+    acquire_execution_lock,
+    heartbeat_execution_lock,
+    release_execution_lock,
+    recover_stuck_executions,
+)
+from app.modules.flows.data_aggregator import (
+    get_cached_sentiment as _get_cached_sentiment,
+    set_cached_sentiment as _set_cached_sentiment,
+)
+from app.modules.flows.swarm_coordinator import (
+    usage_delta as _usage_delta,
+    aggregate_usage as _aggregate_usage,
+    aggregate_swarm_results as _aggregate_swarm_results,
+)
+from app.modules.flows.statistics import update_flow_statistics as _update_flow_statistics
+from app.modules.flows.orchestrator import (
+    emit_execution_update as _emit_execution_update,
+    get_auto_loop_settings as _get_auto_loop_settings,
+)
+from app.modules.flows.trade_executor import (
+    place_order_with_retry as _place_order_with_retry,
+)
+
 logger = get_logger(__name__)
 
 
-async def _emit_execution_update(execution_id: str, flow_id: str, status: str, current_step: int, step_name: str, progress_percent: int, message: str = "", user_id: str = None):
-    """Emit execution update via Socket.IO to notify frontend of progress."""
-    try:
-        # Import here to avoid circular imports
-        from app.main import sio
-
-        # Emit to user's positions room if user_id is provided, otherwise emit globally
-        room = f'positions:{user_id}' if user_id else f'executions:{execution_id}'
-
-        await sio.emit('execution_update', {
-            'execution_id': execution_id,
-            'flow_id': flow_id,
-            'status': status,
-            'current_step': current_step,
-            'step_name': step_name,
-            'progress_percent': progress_percent,
-            'message': message
-        }, room=room)
-        logger.debug(f"Emitted execution_update for execution {execution_id}: step {current_step} ({progress_percent}%) to room {room}")
-    except Exception as e:
-        logger.warning(f"Failed to emit execution update: {e}")
+# _emit_execution_update is imported from orchestrator.py
 
 
 # Collection names
@@ -79,477 +95,34 @@ AI_CONVERSATIONS_COLLECTION = "ai_conversations"
 LEARNING_OUTCOMES_COLLECTION = "learning_outcomes"
 
 
-# ==================== EXTERNAL SENTIMENT CACHE ====================
-# Simple in-memory cache with timestamps for Reddit and Polymarket data
-# TTL: 15 minutes (900 seconds) to avoid spamming external APIs
-
-_external_sentiment_cache: Dict[str, Tuple[Any, float]] = {}
-EXTERNAL_SENTIMENT_CACHE_TTL = 900  # 15 minutes in seconds
+# Sentiment cache functions imported from data_aggregator.py
 
 
-def _get_cached_sentiment(key: str) -> Optional[Any]:
-    """
-    Get cached sentiment data if not expired.
-    
-    Args:
-        key: Cache key (e.g., "reddit:BTC" or "polymarket:btc:1h")
-        
-    Returns:
-        Cached data if valid, None if expired or not found
-    """
-    if key in _external_sentiment_cache:
-        data, timestamp = _external_sentiment_cache[key]
-        if (time.time() - timestamp) < EXTERNAL_SENTIMENT_CACHE_TTL:
-            logger.debug(f"Cache hit for {key}")
-            return data
-        else:
-            # Cache expired, remove it
-            del _external_sentiment_cache[key]
-            logger.debug(f"Cache expired for {key}")
-    return None
+# _get_or_create_demo_user imported from utils.py
 
 
-def _set_cached_sentiment(key: str, data: Any) -> None:
-    """
-    Store sentiment data in cache with current timestamp.
-    
-    Args:
-        key: Cache key
-        data: Data to cache
-    """
-    _external_sentiment_cache[key] = (data, time.time())
-    logger.debug(f"Cache set for {key}")
+# _usage_delta and _aggregate_usage imported from swarm_coordinator.py
 
 
-async def _get_or_create_demo_user(db: AsyncIOMotorDatabase) -> Optional[str]:
-    """
-    Get or create a demo user for demo mode positions.
-    
-    Returns:
-        str: Demo user ID, or None if creation fails
-    """
-    try:
-        # Try to find existing demo user by email
-        auth = await db["auth"].find_one({"email": "demo@moniqo.com", "is_deleted": False})
-        if auth:
-            user = await db["users"].find_one({"auth_id": auth["_id"], "is_deleted": False})
-            if user:
-                logger.info(f"Found existing demo user: {user['_id']}")
-                return str(user["_id"])
-        
-        # Create demo user if not found
-        from app.core.security import hash_password
-        from datetime import datetime
-        import warnings
-        
-        # Suppress bcrypt version warning (non-critical)
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="passlib")
-            # Create auth record
-            auth_data = {
-                "email": "demo@moniqo.com",
-                "password_hash": hash_password("demo_password_not_used"),
-            "is_verified": True,
-            "is_active": True,
-            "is_deleted": False,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        }
-        auth_result = await db["auth"].insert_one(auth_data)
-        auth_id = auth_result.inserted_id
-        
-        # Create user record
-        user_data = {
-            "auth_id": auth_id,
-            "first_name": "Demo",
-            "last_name": "User",
-            "is_deleted": False,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        }
-        user_result = await db["users"].insert_one(user_data)
-        user_id = str(user_result.inserted_id)
-        
-        logger.info(f"Created demo user: {user_id}")
-        return user_id
-    except Exception as e:
-        logger.error(f"Failed to get or create demo user: {e}")
-        return None
+# _update_flow_statistics imported from statistics.py
 
 
-def _usage_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute per-call token usage deltas from model info snapshots."""
-    return {
-        "input_tokens": max(0, int(after.get("total_input_tokens", 0)) - int(before.get("total_input_tokens", 0))),
-        "output_tokens": max(0, int(after.get("total_output_tokens", 0)) - int(before.get("total_output_tokens", 0))),
-        "cost_usd": max(0.0, float(after.get("total_cost_usd", 0.0)) - float(before.get("total_cost_usd", 0.0))),
-        "model_provider": after.get("provider") or before.get("provider"),
-        "model_name": after.get("model_name") or before.get("model_name"),
-    }
+# _aggregate_swarm_results imported from swarm_coordinator.py
 
 
-def _aggregate_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate token usage across multiple agent calls."""
-    if not usages:
-        return {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cost_usd": 0.0,
-            "model_provider": None,
-            "model_name": None,
-        }
+# Utility functions imported from utils.py:
+# _resolve_order_quantity, _resolve_demo_force_action
+# _to_object_id, _to_serializable, _to_response_payload
 
-    return {
-        "input_tokens": sum(u.get("input_tokens", 0) for u in usages),
-        "output_tokens": sum(u.get("output_tokens", 0) for u in usages),
-        "cost_usd": sum(u.get("cost_usd", 0.0) for u in usages),
-        "model_provider": usages[0].get("model_provider"),
-        "model_name": usages[0].get("model_name"),
-    }
+# Auto-loop and scheduling functions imported from orchestrator.py:
+# _get_auto_loop_settings, _schedule_auto_loop
 
+# NOTE: The _schedule_auto_loop function in orchestrator.py references
+# get_flow_by_id and execute_flow from this module, so we keep the definition
+# here to avoid circular imports. The orchestrator.py version is a simplified
+# facade that delegates to this module.
 
-async def _update_flow_statistics(
-    db: AsyncIOMotorDatabase,
-    flow_id: str,
-    position_id: Optional[str] = None,
-    execution_completed: bool = True,
-    completed_at: Optional[datetime] = None,
-    increment_executions: bool = True,
-) -> None:
-    """
-    Update flow statistics with P&L analytics.
-    
-    This function implements the UpdateFlowStats step from the flowchart.
-    It atomically updates flow statistics including:
-    - total_executions count (if increment_executions=True)
-    - successful_executions count (if increment_executions=True)
-    - total_pnl_usd (from closed positions)
-    - total_pnl_percent (average P&L percentage)
-    - win_rate (percentage of profitable trades)
-    
-    Args:
-        db: Database instance
-        flow_id: Flow ID
-        position_id: Optional position ID to fetch realized P&L from
-        execution_completed: Whether execution completed successfully
-        completed_at: Completion timestamp
-        increment_executions: Whether to increment execution counts (False when called from position close)
-    """
-    try:
-        completed_at = completed_at or datetime.now(timezone.utc)
-        flow_obj_id = ObjectId(flow_id)
-        
-        # Fetch realized P&L from position if provided
-        realized_pnl_usd = Decimal("0")
-        realized_pnl_percent = Decimal("0")
-        is_profitable = False
-        
-        if position_id:
-            try:
-                position_doc = await db[POSITIONS_COLLECTION].find_one({
-                    "_id": ObjectId(position_id),
-                    "flow_id": flow_obj_id,
-                })
-                
-                if position_doc and position_doc.get("exit"):
-                    exit_data = position_doc.get("exit", {})
-                    realized_pnl_usd = Decimal(str(exit_data.get("realized_pnl", 0)))
-                    realized_pnl_percent = Decimal(str(exit_data.get("realized_pnl_percent", 0)))
-                    is_profitable = float(realized_pnl_usd) > 0
-                    logger.debug(f"Fetched P&L from position {position_id}: ${realized_pnl_usd}, {realized_pnl_percent}%")
-            except Exception as e:
-                logger.warning(f"Failed to fetch P&L from position {position_id}: {e}")
-        
-        # Get current flow stats for win_rate calculation
-        flow_doc = await db[FLOWS_COLLECTION].find_one({"_id": flow_obj_id})
-        if not flow_doc:
-            logger.warning(f"Flow {flow_id} not found for stats update")
-            return
-        
-        current_total_executions = flow_doc.get("total_executions", 0)
-        current_successful_executions = flow_doc.get("successful_executions", 0)
-        current_total_pnl_usd = Decimal(str(flow_doc.get("total_pnl_usd", 0)))
-        current_winning_trades = flow_doc.get("winning_trades", 0)  # Track winning trades separately
-        
-        # Prepare update operations
-        update_ops = {
-            "$set": {
-                "last_run_at": completed_at,
-                "updated_at": completed_at,
-            }
-        }
-        
-        # Only increment execution counts if requested (not when called from position close)
-        if increment_executions:
-            update_ops["$inc"] = {
-                "total_executions": 1,
-            }
-            if execution_completed:
-                update_ops["$inc"]["successful_executions"] = 1
-        else:
-            update_ops["$inc"] = {}
-        
-        # Add P&L if position was closed
-        if position_id and realized_pnl_usd != 0:
-            update_ops["$inc"]["total_pnl_usd"] = float(realized_pnl_usd)
-            
-            # Track winning trades for win_rate calculation
-            if is_profitable:
-                update_ops["$inc"]["winning_trades"] = 1
-            
-            # Calculate new total P&L percent (weighted average)
-            new_total_pnl_usd = current_total_pnl_usd + realized_pnl_usd
-            new_total_executions = current_total_executions + 1
-            
-            if new_total_executions > 0:
-                # Average P&L percent across all closed positions
-                # This is a simplified calculation - could be enhanced to track per-position
-                avg_pnl_percent = (new_total_pnl_usd / Decimal(str(new_total_executions)) * Decimal("100")) if new_total_executions > 0 else Decimal("0")
-                # For now, use the latest position's P&L percent as a proxy
-                # A more accurate approach would require tracking all position P&L percentages
-                update_ops["$set"]["total_pnl_percent"] = float(realized_pnl_percent)
-        
-        # Calculate win_rate
-        # If incrementing executions, use new counts; otherwise use current counts
-        if increment_executions:
-            new_successful_executions = current_successful_executions + (1 if execution_completed else 0)
-            new_winning_trades = current_winning_trades + (1 if (is_profitable and execution_completed) else 0)
-        else:
-            # Position close: execution was already counted, just update winning trades if profitable
-            new_successful_executions = current_successful_executions
-            new_winning_trades = current_winning_trades + (1 if is_profitable else 0)
-            if is_profitable:
-                update_ops["$inc"]["winning_trades"] = 1
-        
-        if new_successful_executions > 0:
-            win_rate = (new_winning_trades / new_successful_executions) * 100.0
-            update_ops["$set"]["win_rate"] = round(win_rate, 2)
-        else:
-            update_ops["$set"]["win_rate"] = 0.0
-        
-        # Atomic update
-        await db[FLOWS_COLLECTION].update_one(
-            {"_id": flow_obj_id},
-            update_ops
-        )
-        
-        new_total_executions = current_total_executions + (1 if increment_executions else 0)
-        new_total_pnl = current_total_pnl_usd + realized_pnl_usd
-        
-        logger.info(
-            f"Updated flow {flow_id} stats: "
-            f"executions={new_total_executions}, "
-            f"successful={new_successful_executions}, "
-            f"PnL=${float(new_total_pnl):.2f}, "
-            f"win_rate={update_ops['$set'].get('win_rate', 0):.2f}%"
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to update flow statistics for {flow_id}: {e}")
-
-
-def _aggregate_swarm_results(
-    results: List[Dict[str, Any]],
-    role_weights: Optional[Dict[str, float]] = None,
-) -> Dict[str, Any]:
-    """Aggregate swarm analyst results into a single decision."""
-    members = []
-    role_weights = role_weights or {}
-    for result in results:
-        if not result:
-            continue
-        action = result.get("action") or "hold"
-        confidence = float(result.get("confidence") or 0)
-        role = result.get("role") or "market_analyst"
-        weight = float(role_weights.get(role, 1.0)) * confidence
-        members.append({
-            "action": action,
-            "confidence": confidence,
-            "reasoning": result.get("reasoning", ""),
-            "role": role,
-            "weight": weight,
-            "raw": result,
-        })
-
-    if not members:
-        return {
-            "action": "hold",
-            "confidence": 0.0,
-            "reasoning": "No valid swarm results.",
-            "members": [],
-            "votes": {},
-            "agreement": 0,
-            "is_unanimous": False,
-        }
-
-    counts: Dict[str, int] = {}
-    confidence_map: Dict[str, List[float]] = {}
-    weighted_confidence: Dict[str, float] = {}
-    for member in members:
-        action = member["action"]
-        counts[action] = counts.get(action, 0) + 1
-        confidence_map.setdefault(action, []).append(member["confidence"])
-        weighted_confidence[action] = weighted_confidence.get(action, 0.0) + member["weight"]
-
-    ranked = sorted(
-        counts.items(),
-        key=lambda item: (item[1], weighted_confidence.get(item[0], 0.0)),
-        reverse=True,
-    )
-    top_action = ranked[0][0]
-    total_weight = sum(weighted_confidence.values()) or 1.0
-    avg_confidence = weighted_confidence[top_action] / total_weight
-    total_votes = len(members)
-    agreement = int((counts[top_action] / total_votes) * 100)
-    reasoning = (
-        f"Swarm consensus: {top_action} "
-        f"({counts[top_action]}/{len(members)}) with avg confidence {avg_confidence:.2f}."
-    )
-
-    return {
-        "action": top_action,
-        "confidence": round(avg_confidence, 4),
-        "reasoning": reasoning,
-        "members": members,
-        "votes": {
-            action: {
-                "count": counts[action],
-                "total_confidence": sum(confidence_map[action]),
-                "weighted_confidence": weighted_confidence.get(action, 0.0),
-            }
-            for action in counts
-        },
-        "agreement": agreement,
-        "is_unanimous": counts[top_action] == total_votes,
-    }
-
-
-def _resolve_order_quantity(
-    action: str,
-    current_price: Decimal,
-    base_balance: Optional[Decimal],
-    quote_balance: Optional[Decimal],
-    order_quantity: Optional[Decimal],
-    order_size_usd: Optional[Decimal],
-    order_size_percent: Optional[Decimal],
-    default_balance_percent: Decimal,
-) -> Tuple[Decimal, Dict[str, Any]]:
-    """Resolve order quantity using balances and sizing rules."""
-    if current_price <= 0:
-        raise Exception("Cannot resolve quantity without a valid current price")
-
-    sizing_meta: Dict[str, Any] = {
-        "base_balance": float(base_balance) if base_balance is not None else None,
-        "quote_balance": float(quote_balance) if quote_balance is not None else None,
-    }
-
-    if order_quantity is not None:
-        return order_quantity, sizing_meta
-
-    if action == "buy":
-        if quote_balance is None:
-            raise Exception("Quote balance unavailable for buy sizing")
-        if order_size_percent is not None:
-            order_size_usd = (order_size_percent / Decimal("100")) * quote_balance
-            sizing_meta["sizing_method"] = "percent"
-        elif order_size_usd is None:
-            order_size_usd = (default_balance_percent / Decimal("100")) * quote_balance
-            sizing_meta["sizing_method"] = "default_percent"
-        order_size_usd = min(order_size_usd, quote_balance)
-        sizing_meta["order_size_usd"] = float(order_size_usd)
-        return order_size_usd / current_price, sizing_meta
-
-    if base_balance is None:
-        raise Exception("Base balance unavailable for sell sizing")
-    if order_size_percent is not None:
-        sizing_meta["sizing_method"] = "percent"
-        quantity = (order_size_percent / Decimal("100")) * base_balance
-    elif order_size_usd is not None:
-        sizing_meta["sizing_method"] = "usd"
-        quantity = order_size_usd / current_price
-    else:
-        sizing_meta["sizing_method"] = "default_percent"
-        quantity = (default_balance_percent / Decimal("100")) * base_balance
-
-    return min(quantity, base_balance), sizing_meta
-
-
-def _resolve_demo_force_action(
-    analysis_action: str,
-    signal_data: Optional[Dict[str, Any]],
-    config: Dict[str, Any],
-) -> Tuple[str, str]:
-    """Resolve a forced action for demo mode when analysis returns hold."""
-    if analysis_action in {"buy", "sell"}:
-        return analysis_action, "Analysis action used for demo execution."
-
-    configured_action = config.get("demo_force_action")
-    if configured_action in {"buy", "sell"}:
-        return configured_action, "demo_force_action override applied."
-
-    classification = (signal_data or {}).get("classification")
-    if classification in {"bullish", "very_bullish"}:
-        return "buy", "Signal classification bullish; forced buy."
-    if classification in {"bearish", "very_bearish"}:
-        return "sell", "Signal classification bearish; forced sell."
-
-    return "buy", "No actionable signal; defaulting forced action to buy."
-
-
-def _to_object_id(value: Optional[str]) -> Optional[ObjectId]:
-    """Convert string to ObjectId when possible."""
-    if not value:
-        return None
-    try:
-        return ObjectId(str(value))
-    except Exception:
-        return None
-
-
-def _to_serializable(value: Any) -> Any:
-    """Convert values (Decimal, Enum, nested structures) to Mongo-safe types."""
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {key: _to_serializable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_serializable(item) for item in value]
-    return value
-
-
-def _to_response_payload(value: Any) -> Any:
-    """Convert values to API-safe types (includes ObjectId stringification)."""
-    if isinstance(value, ObjectId):
-        return str(value)
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {key: _to_response_payload(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_response_payload(item) for item in value]
-    return value
-
-
-def _get_auto_loop_settings(flow: Flow) -> Tuple[bool, int, Optional[int]]:
-    config = flow.config or {}
-    enabled = bool(config.get("auto_loop_enabled", True))
-    delay_seconds = int(config.get("auto_loop_delay_seconds", 30))
-    if delay_seconds <= 0:
-        delay_seconds = 5
-    max_cycles = config.get("auto_loop_max_cycles")
-    if max_cycles is not None:
-        try:
-            max_cycles = int(max_cycles)
-        except (TypeError, ValueError):
-            max_cycles = None
-    return enabled, delay_seconds, max_cycles
-
-
-async def _schedule_auto_loop(
+async def _schedule_auto_loop_impl(
     db: AsyncIOMotorDatabase,
     flow: Flow,
     model_provider: str,
@@ -558,11 +131,7 @@ async def _schedule_auto_loop(
     """
     Schedule the next iteration of the continuous trading loop.
     
-    This implements the EndCycle --> WaitTrigger loop from the flowchart.
-    The loop continues until:
-    - Flow status is changed to PAUSED (via stop_flow)
-    - max_cycles limit is reached (if configured)
-    - auto_loop_enabled is set to False
+    Internal implementation - use _schedule_auto_loop from orchestrator for external calls.
     """
     enabled, delay_seconds, max_cycles = _get_auto_loop_settings(flow)
     if not enabled:
@@ -596,16 +165,13 @@ async def _schedule_auto_loop(
             
             await execute_flow(db, refreshed, model_provider, model_name)
         except Exception as e:
-            # Log error but continue the loop - don't let one failure stop trading
             logger.error(f"Auto-loop execution failed for flow {flow.id}: {e}")
             
-            # Re-check flow status before scheduling retry
             try:
                 refreshed = await get_flow_by_id(db, flow.id)
                 if refreshed and refreshed.status == FlowStatus.ACTIVE:
                     logger.info(f"Scheduling retry for flow {flow.id} after error")
-                    # Schedule next attempt with same delay
-                    await _schedule_auto_loop(db, refreshed, model_provider, model_name)
+                    await _schedule_auto_loop_impl(db, refreshed, model_provider, model_name)
             except Exception as retry_error:
                 logger.error(f"Failed to schedule retry for flow {flow.id}: {retry_error}")
 
@@ -625,46 +191,7 @@ async def _schedule_auto_loop(
     asyncio.create_task(_delayed_run())
 
 
-async def _place_order_with_retry(
-    wallet,
-    symbol: str,
-    side: OrderSide,
-    order_type: OrderType,
-    quantity: Decimal,
-    price: Optional[Decimal],
-    stop_price: Optional[Decimal],
-    time_in_force: TimeInForce,
-    max_retries: int,
-    retry_delay_seconds: float,
-) -> Dict[str, Any]:
-    """Place an order with retries for transient failures."""
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await wallet.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=order_type,
-                quantity=quantity,
-                price=price,
-                stop_price=stop_price,
-                time_in_force=time_in_force,
-            )
-        except Exception as e:
-            last_error = e
-            logger.warning(
-                "Order placement failed (attempt %s/%s): %s",
-                attempt,
-                max_retries,
-                str(e),
-            )
-            if attempt < max_retries:
-                await asyncio.sleep(retry_delay_seconds * attempt)
-
-    if last_error:
-        raise last_error
-    raise Exception("Order placement failed without error details")
+# _place_order_with_retry imported from trade_executor.py
 
 
 # ==================== FLOW CRUD ====================
@@ -971,212 +498,8 @@ async def delete_all_executions(
 
 
 # ==================== EXECUTION LOCK MANAGEMENT ====================
-
-async def acquire_execution_lock(
-    db: AsyncIOMotorDatabase,
-    flow_id: str,
-    execution_id: str
-) -> bool:
-    """
-    Atomically acquire execution lock using find_one_and_update.
-    
-    Returns:
-        True if lock acquired, False if already locked
-    """
-    lock_id = f"flow_lock_{flow_id}"
-    lock_collection = "execution_locks"
-    
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=30)
-    
-    # Check if lock exists and is not expired
-    existing_lock = await db[lock_collection].find_one({"_id": lock_id})
-    if existing_lock:
-        lock_expires = existing_lock.get("expires_at")
-        if lock_expires and isinstance(lock_expires, datetime):
-            # Ensure timezone-aware comparison
-            if lock_expires.tzinfo is None:
-                lock_expires = lock_expires.replace(tzinfo=timezone.utc)
-            if lock_expires >= now:
-                # Lock exists and is not expired
-                logger.debug(f"Lock {lock_id} exists and is not expired (expires at {lock_expires})")
-                return False
-    
-    # Lock doesn't exist or is expired - try to acquire it
-    # Use update_one with upsert=False first to avoid duplicate key errors
-    if existing_lock:
-        # Update expired lock
-        update_result = await db[lock_collection].update_one(
-            {
-                "_id": lock_id,
-                "$or": [
-                    {"expires_at": {"$lt": now}},
-                    {"expires_at": {"$exists": False}}
-                ]
-            },
-            {
-                "$set": {
-                    "flow_id": _to_object_id(flow_id) or flow_id,
-                    "execution_id": execution_id,
-                    "acquired_at": now,
-                    "expires_at": expires_at,
-                    "last_heartbeat": now
-                }
-            }
-        )
-        if update_result.modified_count > 0:
-            return True
-    else:
-        # Lock doesn't exist - create it
-        try:
-            await db[lock_collection].insert_one({
-                "_id": lock_id,
-                "flow_id": _to_object_id(flow_id) or flow_id,
-                "execution_id": execution_id,
-                "acquired_at": now,
-                "expires_at": expires_at,
-                "last_heartbeat": now
-            })
-            return True
-        except Exception as e:
-            # Another process created the lock between our check and insert
-            if "duplicate key" in str(e).lower() or "E11000" in str(e):
-                logger.debug(f"Lock {lock_id} was created by another process")
-                return False
-            raise
-    
-    # If we get here, lock exists but update didn't match (race condition)
-    # Check again if it's still expired
-    final_check = await db[lock_collection].find_one({"_id": lock_id})
-    if final_check:
-        lock_expires = final_check.get("expires_at")
-        if lock_expires and isinstance(lock_expires, datetime):
-            if lock_expires.tzinfo is None:
-                lock_expires = lock_expires.replace(tzinfo=timezone.utc)
-            if lock_expires >= now:
-                return False
-    
-    return False
-
-
-async def heartbeat_execution_lock(
-    db: AsyncIOMotorDatabase,
-    flow_id: str,
-    execution_id: str
-) -> bool:
-    """
-    Update lock expiration time (heartbeat).
-    
-    Returns:
-        True if heartbeat successful, False if lock doesn't match execution_id
-    """
-    lock_id = f"flow_lock_{flow_id}"
-    lock_collection = "execution_locks"
-    
-    now = datetime.now(timezone.utc)
-    new_expires_at = now + timedelta(minutes=30)
-    
-    # Only update if lock matches this execution_id (prevents stealing)
-    result = await db[lock_collection].update_one(
-        {
-            "_id": lock_id,
-            "execution_id": execution_id  # Critical: verify ownership
-        },
-        {
-            "$set": {
-                "expires_at": new_expires_at,
-                "last_heartbeat": now
-            }
-        }
-    )
-    
-    return result.modified_count > 0
-
-
-async def recover_stuck_executions(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
-    """
-    Recover stuck executions on system startup.
-    
-    Finds executions in RUNNING status with expired locks
-    and marks them as FAILED.
-    
-    Returns:
-        Dict with recovery statistics
-    """
-    now = datetime.now(timezone.utc)
-    lock_collection = "execution_locks"
-    
-    # Find all expired locks
-    expired_locks = await db[lock_collection].find({
-        "expires_at": {"$lt": now}
-    }).to_list(length=None)
-    
-    recovered_count = 0
-    
-    for lock in expired_locks:
-        flow_id = lock.get("flow_id")
-        execution_id = lock.get("execution_id")
-        
-        if execution_id:
-            # Check if execution is still RUNNING
-            execution = await db[EXECUTIONS_COLLECTION].find_one({
-                "_id": ObjectId(execution_id),
-                "status": ExecutionStatus.RUNNING.value
-            })
-            
-            if execution:
-                # Mark execution as failed
-                await db[EXECUTIONS_COLLECTION].update_one(
-                    {"_id": ObjectId(execution_id)},
-                    {
-                        "$set": {
-                            "status": ExecutionStatus.FAILED.value,
-                            "completed_at": now,
-                            "error": "Execution marked as stuck: Lock expired (System Restart/Stall)"
-                        }
-                    }
-                )
-                
-                # Clean up lock
-                await db[lock_collection].delete_one({"_id": lock["_id"]})
-                recovered_count += 1
-                logger.info(f"Recovered stuck execution {execution_id} for flow {flow_id}")
-    
-    # Also check for RUNNING executions without locks (orphaned)
-    running_executions = await db[EXECUTIONS_COLLECTION].find({
-        "status": ExecutionStatus.RUNNING.value,
-        "deleted_at": None
-    }).to_list(length=None)
-    
-    orphaned_count = 0
-    for exec_doc in running_executions:
-        flow_id = exec_doc.get("flow_id")
-        execution_id = str(exec_doc.get("_id"))
-        lock_id = f"flow_lock_{flow_id}"
-        
-        # Check if lock exists
-        lock = await db[lock_collection].find_one({"_id": lock_id})
-        
-        if not lock:
-            # Orphaned execution - mark as failed
-            await db[EXECUTIONS_COLLECTION].update_one(
-                {"_id": ObjectId(execution_id)},
-                {
-                    "$set": {
-                        "status": ExecutionStatus.FAILED.value,
-                        "completed_at": now,
-                        "error": "Execution marked as stuck: No lock found (Orphaned execution)"
-                    }
-                }
-            )
-            orphaned_count += 1
-            logger.info(f"Recovered orphaned execution {execution_id} for flow {flow_id}")
-    
-    return {
-        "recovered_expired": recovered_count,
-        "recovered_orphaned": orphaned_count,
-        "total_recovered": recovered_count + orphaned_count
-    }
+# Lock management functions imported from execution_lock.py:
+# acquire_execution_lock, heartbeat_execution_lock, release_execution_lock, recover_stuck_executions
 
 
 # ==================== FLOW EXECUTION ====================
@@ -1428,8 +751,8 @@ async def execute_flow(
             analyst_usage = swarm_usage
             await db[AI_CONVERSATIONS_COLLECTION].insert_one({
                 "user_id": (flow.config or {}).get("user_id"),
-                "execution_id": execution.id,
-                "flow_id": execution.flow_id,
+                "execution_id": str(execution.id),
+                "flow_id": str(execution.flow_id),
                 "context": {
                     "symbol": flow.symbol,
                     "action": "voting",
@@ -2408,11 +1731,16 @@ async def execute_flow(
                     })
                     return execution
                 
+                # Ensure flow_id is properly set - use flow.id as fallback
+                position_flow_id = _to_object_id(execution.flow_id) or _to_object_id(str(flow.id))
+                if not position_flow_id:
+                    logger.warning(f"Could not set flow_id for position. execution.flow_id={execution.flow_id}, flow.id={flow.id}")
+                
                 position_record = {
                     "user_id": user_id_obj,
                     "user_wallet_id": _to_object_id(user_wallet_id) if user_wallet_id else None,
                     "simulated": is_simulated,
-                    "flow_id": _to_object_id(execution.flow_id) if execution.flow_id else None,
+                    "flow_id": position_flow_id,
                     "symbol": flow.symbol,
                     "side": PositionSide.LONG.value if side == "long" else PositionSide.SHORT.value,
                     "status": position_status,

@@ -7,8 +7,7 @@ Author: Moniqo Team
 Last Updated: 2025-11-22
 """
 
-from typing import Dict, List, Optional, Any
-from decimal import Decimal
+from typing import Dict, Optional, Any
 from datetime import datetime, timezone
 
 from app.modules.ai_agents.base_agent import BaseAgent, AgentRole, AgentStatus

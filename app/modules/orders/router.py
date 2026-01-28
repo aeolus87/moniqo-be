@@ -281,10 +281,8 @@ async def get_order(
 async def list_orders(
     status: Optional[OrderStatus] = Query(None, description="Filter by status"),
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
-    page: Optional[int] = Query(None, ge=1, description="Page number"),
-    page_size: Optional[int] = Query(None, ge=1, le=100, description="Page size"),
-    limit: Optional[int] = Query(None, ge=1, le=100, description="Limit (alternative to page_size)"),
-    offset: Optional[int] = Query(None, ge=0, description="Offset (alternative to page)"),
+    limit: int = Query(50, ge=1, le=100, description="Number of items per page"),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_user),
     db = Depends(get_database)
 ):
@@ -304,19 +302,8 @@ async def list_orders(
         # Get total count
         total = await query.count()
         
-        # Support both pagination styles: page/page_size OR limit/offset
-        if limit is not None:
-            # Frontend uses limit/offset
-            page_size_val = limit
-            skip = offset or 0
-        else:
-            # Backend default uses page/page_size
-            page_size_val = page_size or 50
-            page_val = page or 1
-            skip = (page_val - 1) * page_size_val
-        
-        # Paginate
-        orders = await query.skip(skip).limit(page_size_val).sort(-Order.created_at).to_list()
+        # Paginate using limit/offset
+        orders = await query.skip(offset).limit(limit).sort(-Order.created_at).to_list()
         
         # Convert to response
         order_responses = [
@@ -374,8 +361,8 @@ async def list_orders(
         return OrderListResponse(
             orders=order_responses,
             total=total,
-            page=page,
-            page_size=page_size
+            limit=limit,
+            offset=offset
         )
     
     except Exception as e:

@@ -36,20 +36,6 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/flows", tags=["Flows"])
 
 
-def _to_response_payload(value: Any) -> Any:
-    if isinstance(value, ObjectId):
-        return str(value)
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {key: _to_response_payload(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_response_payload(item) for item in value]
-    return value
-
-
 def flow_to_response(flow) -> FlowResponse:
     """Convert Flow model to response"""
     return FlowResponse(
@@ -74,13 +60,29 @@ def execution_to_response(execution) -> ExecutionResponse:
     """Convert Execution model to response"""
     from app.modules.flows.schemas import ExecutionStepResponse, ExecutionResultResponse
     
+    def _serialize_data(data: Any) -> Any:
+        """Serialize data for response, converting ObjectId and Decimal to JSON-serializable types"""
+        if data is None:
+            return None
+        if isinstance(data, ObjectId):
+            return str(data)
+        if isinstance(data, Decimal):
+            return float(data)
+        if isinstance(data, Enum):
+            return data.value
+        if isinstance(data, dict):
+            return {key: _serialize_data(val) for key, val in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [_serialize_data(item) for item in data]
+        return data
+    
     steps = [
         ExecutionStepResponse(
             name=s.name,
             status=s.status,
             started_at=s.started_at,
             completed_at=s.completed_at,
-            data=_to_response_payload(s.data),
+            data=_serialize_data(s.data) if s.data else None,
             error=s.error,
         )
         for s in execution.steps

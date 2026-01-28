@@ -7,7 +7,7 @@ Author: Moniqo Team
 Last Updated: 2025-01-17
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone

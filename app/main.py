@@ -27,6 +27,8 @@ from app.config.database import connect_to_mongodb, close_mongodb_connection, ge
 from app.utils.cache import get_redis_client, close_redis_client
 from app.utils.logger import get_logger
 from app.services.position_tracker import get_position_tracker
+from app.services.market_data_service import MarketDataService, set_market_data_service, get_market_data_service
+from app.integrations.market_data.binance_ws_client import BinanceWebSocketClient
 
 logger = get_logger(__name__)
 
@@ -102,7 +104,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to recover stuck executions on startup: {e}")
         
-        # TODO: Run initialization scripts (Sprint 34)
+        # Initialize market data service with Binance WebSocket
+        try:
+            db = get_database()
+            market_provider = BinanceWebSocketClient(use_futures=True)
+            market_service = MarketDataService(market_provider, sio)
+            await market_service.start(db=db)  # Pass DB for real-time position updates
+            set_market_data_service(market_service)
+            app.state.market_data_service = market_service
+            logger.info("Market data service started")
+        except Exception as e:
+            logger.warning(f"Failed to start market data service: {e}")
         
         logger.info("Application started successfully")
     except Exception as e:
@@ -121,6 +133,12 @@ async def lifespan(app: FastAPI):
                 await position_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop market data service
+        market_service = get_market_data_service()
+        if market_service:
+            await market_service.stop()
+            logger.info("Market data service stopped")
 
         # Close MongoDB connection
         await close_mongodb_connection()
@@ -435,13 +453,18 @@ async def connect(sid, environ, auth):
 async def disconnect(sid):
     """Handle client disconnection"""
     logger.info(f'Client disconnected: {sid}')
+    
+    # Clean up market subscriptions
+    market_service = get_market_data_service()
+    if market_service:
+        await market_service.handle_disconnect(sid)
 
 @sio.on('subscribe_positions')
 async def subscribe_positions(sid, data, callback=None):
     """Subscribe to position updates for a user"""
     user_id = data.get('user_id')
     if user_id:
-        sio.enter_room(sid, f'positions:{user_id}')
+        await sio.enter_room(sid, f'positions:{user_id}')
         logger.info(f'Client {sid} subscribed to positions for user {user_id}')
         response = {'success': True, 'room': f'positions:{user_id}'}
         if callback:
@@ -457,13 +480,52 @@ async def unsubscribe_positions(sid, data, callback=None):
     """Unsubscribe from position updates"""
     user_id = data.get('user_id')
     if user_id:
-        sio.leave_room(sid, f'positions:{user_id}')
+        await sio.leave_room(sid, f'positions:{user_id}')
         logger.info(f'Client {sid} unsubscribed from positions for user {user_id}')
         response = {'success': True}
         if callback:
             await callback(response)
         return response
     response = {'success': False, 'error': 'user_id required'}
+    if callback:
+        await callback(response)
+    return response
+
+@sio.on('subscribe_market')
+async def subscribe_market(sid, data, callback=None):
+    """Subscribe to real-time market data for symbols"""
+    symbols = data.get('symbols', [])
+    if not symbols:
+        response = {'success': False, 'error': 'symbols required'}
+        if callback:
+            await callback(response)
+        return response
+    
+    market_service = get_market_data_service()
+    if not market_service:
+        response = {'success': False, 'error': 'Market data service not available'}
+        if callback:
+            await callback(response)
+        return response
+    
+    await market_service.subscribe_user(sid, symbols)
+    logger.info(f'Client {sid} subscribed to market data for: {symbols}')
+    response = {'success': True, 'symbols': symbols}
+    if callback:
+        await callback(response)
+    return response
+
+@sio.on('unsubscribe_market')
+async def unsubscribe_market(sid, data, callback=None):
+    """Unsubscribe from real-time market data"""
+    symbols = data.get('symbols')  # None means unsubscribe from all
+    
+    market_service = get_market_data_service()
+    if market_service:
+        await market_service.unsubscribe_user(sid, symbols)
+        logger.info(f'Client {sid} unsubscribed from market data')
+    
+    response = {'success': True}
     if callback:
         await callback(response)
     return response

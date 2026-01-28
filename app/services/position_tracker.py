@@ -117,17 +117,21 @@ class PositionTrackerService:
                     import sys
                     if 'app.main' in sys.modules:
                         from app.main import sio
+                        entry = position.entry or {}
+                        risk = position.risk_management or {}
                         await sio.emit('position_update', {
-                            'position_id': str(position.id),
-                            'user_id': str(position.user_id),
+                            'id': str(position.id),
                             'symbol': position.symbol,
                             'side': position.side.value,
+                            'entry_price': float(entry.get("price", 0)),
                             'current_price': float(current_price),
-                            'current_value': float(position.current["value"]),
+                            'quantity': float(entry.get("amount", 0)),
                             'unrealized_pnl': float(position.current["unrealized_pnl"]),
-                            'unrealized_pnl_percent': float(position.current["unrealized_pnl_percent"]),
-                            'risk_level': position.current.get("risk_level", "medium"),
-                            'last_updated': position.current["last_updated"].isoformat() if isinstance(position.current.get("last_updated"), datetime) else None
+                            'realized_pnl': 0,
+                            'status': position.status.value,
+                            'stop_loss': float(risk.get("current_stop_loss") or risk.get("stop_loss") or 0) or None,
+                            'take_profit': float(risk.get("current_take_profit") or risk.get("take_profit") or 0) or None,
+                            'updated_at': position.current["last_updated"].isoformat() if isinstance(position.current.get("last_updated"), datetime) else datetime.now(timezone.utc).isoformat()
                         }, room=f'positions:{position.user_id}')
                 except Exception as e:
                     logger.warning(f"Failed to emit position update via Socket.IO: {e}")
@@ -315,18 +319,22 @@ class PositionTrackerService:
                         else:
                             user_id_str = str(user_id)
                             room = f"positions:{user_id_str}"
+                            entry = doc.get("entry", {})
+                            risk = doc.get("risk_management", {})
 
                             update_data = {
-                                "position_id": str(doc.get("_id")),
-                                "user_id": user_id_str,
+                                "id": str(doc.get("_id")),
                                 "symbol": symbol,
                                 "side": doc.get("side"),
+                                "entry_price": float(entry.get("price", 0)),
                                 "current_price": float(current_price),
-                                "current_value": float(current_value),
+                                "quantity": float(entry.get("amount", 0)),
                                 "unrealized_pnl": float(unrealized_pnl),
-                                "unrealized_pnl_percent": float(unrealized_pnl_percent),
-                                "risk_level": current_update["risk_level"],
-                                "last_updated": now.isoformat(),
+                                "realized_pnl": 0,
+                                "status": doc.get("status", "open"),
+                                "stop_loss": float(risk.get("current_stop_loss") or risk.get("stop_loss") or 0) or None,
+                                "take_profit": float(risk.get("current_take_profit") or risk.get("take_profit") or 0) or None,
+                                "updated_at": now.isoformat(),
                             }
                             logger.info(f"Emitting position_update to room {room} for position {doc.get('_id')}")
                             await sio.emit("position_update", update_data, room=room)

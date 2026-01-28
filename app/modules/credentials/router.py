@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config.database import get_database
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, validate_object_id
 from app.core.responses import success_response, error_response, paginated_response
 from app.core.exceptions import ValidationError, NotFoundError
 from app.modules.credentials import service as credential_service
@@ -183,26 +183,16 @@ async def get_credentials(
     Requires authentication. Users can only access their own credentials.
     
     Args:
-        credentials_id: Credentials ID
+        credentials_id: Credentials ID (validated as ObjectId)
         current_user: Current authenticated user
         db: Database instance
         
     Returns:
         Standardized response with credential data (without secrets)
     """
+    validate_object_id(credentials_id)
     try:
         from bson import ObjectId
-        from bson.errors import InvalidId
-        # Validate ObjectId format
-        try:
-            ObjectId(credentials_id)
-        except InvalidId:
-            return error_json_response(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                message="Invalid credentials ID format",
-                error_code="VALIDATION_ERROR",
-                error_message=f"'{credentials_id}' is not a valid credentials ID"
-            )
         
         credentials = await credential_service.get_user_credentials(
             db,
@@ -252,7 +242,7 @@ async def update_credentials(
     If credentials are updated, they are re-encrypted.
     
     Args:
-        credentials_id: Credentials ID
+        credentials_id: Credentials ID (validated as ObjectId)
         update_data: Update data
         current_user: Current authenticated user
         db: Database instance
@@ -260,19 +250,9 @@ async def update_credentials(
     Returns:
         Standardized response with updated credential (without secrets)
     """
+    validate_object_id(credentials_id)
     try:
         from bson import ObjectId
-        from bson.errors import InvalidId
-        # Validate ObjectId format
-        try:
-            ObjectId(credentials_id)
-        except InvalidId:
-            return error_json_response(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                message="Invalid credentials ID format",
-                error_code="VALIDATION_ERROR",
-                error_message=f"'{credentials_id}' is not a valid credentials ID"
-            )
         
         credentials = await credential_service.update_user_credentials(
             db,
@@ -329,26 +309,16 @@ async def delete_credentials(
     Requires authentication. Users can only delete their own credentials.
     
     Args:
-        credentials_id: Credentials ID
+        credentials_id: Credentials ID (validated as ObjectId)
         current_user: Current authenticated user
         db: Database instance
         
     Returns:
         Standardized success response
     """
+    validate_object_id(credentials_id)
     try:
         from bson import ObjectId
-        from bson.errors import InvalidId
-        # Validate ObjectId format
-        try:
-            ObjectId(credentials_id)
-        except InvalidId:
-            return error_json_response(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                message="Invalid credentials ID format",
-                error_code="VALIDATION_ERROR",
-                error_message=f"'{credentials_id}' is not a valid credentials ID"
-            )
         
         await credential_service.delete_user_credentials(
             db,
@@ -397,26 +367,16 @@ async def test_connection(
     Decrypts credentials and attempts to connect to exchange API.
     
     Args:
-        credentials_id: Credentials ID
+        credentials_id: Credentials ID (validated as ObjectId)
         current_user: Current authenticated user
         db: Database instance
         
     Returns:
         Standardized response with connection test result
     """
+    validate_object_id(credentials_id)
     try:
         from bson import ObjectId
-        from bson.errors import InvalidId
-        # Validate ObjectId format
-        try:
-            ObjectId(credentials_id)
-        except InvalidId:
-            return error_json_response(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                message="Invalid credentials ID format",
-                error_code="VALIDATION_ERROR",
-                error_message=f"'{credentials_id}' is not a valid credentials ID"
-            )
         
         test_result = await credential_service.test_connection(
             db,

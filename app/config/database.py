@@ -7,6 +7,7 @@ Provides database instance and connection management with lifespan events.
 import logging
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from beanie import init_beanie
 
 from app.config.settings import get_settings
 
@@ -53,6 +54,14 @@ async def connect_to_mongodb() -> None:
         
         # Test the connection
         await _client.admin.command("ping")
+        
+        # Initialize Beanie with document models
+        from app.modules.positions.models import Position, PositionUpdate
+        from app.modules.orders.models import Order
+        await init_beanie(
+            database=_database,
+            document_models=[Position, PositionUpdate, Order]
+        )
         
         logger.info(
             "Successfully connected to MongoDB database: %s",

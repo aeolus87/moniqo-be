@@ -152,8 +152,8 @@ class OrderListResponse(BaseModel):
     """Order list response"""
     orders: List[OrderResponse]
     total: int
-    page: int = 1
-    page_size: int = 50
+    limit: int
+    offset: int
 
 
 class OrderCreateResponse(BaseModel):

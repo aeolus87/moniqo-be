@@ -185,12 +185,12 @@ class Order(Document):
             "user_id",
             "status",
             "created_at",
-            ("user_id", "status", "created_at"),
-            ("user_wallet_id", "status"),
+            [("user_id", 1), ("status", 1), ("created_at", -1)],
+            [("user_wallet_id", 1), ("status", 1)],
             "position_id",
             "external_order_id",
-            ("status", "order_type"),  # For monitoring loops
-            ("symbol", "created_at"),
+            [("status", 1), ("order_type", 1)],
+            [("symbol", 1), ("created_at", -1)],
         ]
         arbitrary_types_allowed = True
     
