@@ -22,6 +22,7 @@ Last Updated: 2025-11-22
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
 
 from app.config.database import get_database
 from app.core.dependencies import get_current_user
@@ -36,7 +37,9 @@ from app.modules.user_wallets.schemas import (
     SyncBalanceResponse,
     WalletSyncLogResponse,
     WalletSyncLogListResponse,
-    ErrorResponse
+    ErrorResponse,
+    AddBalanceRequest,
+    AddBalanceResponse
 )
 from app.modules.user_wallets import service
 from app.utils.logger import get_logger
@@ -481,6 +484,101 @@ async def get_wallet_sync_logs(
         )
     except Exception as e:
         logger.error(f"Failed to get sync logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post(
+    "/user-wallets/{wallet_id}/add-balance",
+    response_model=AddBalanceResponse,
+    summary="Add Balance to Demo Wallet",
+    description="Manually add balance to a demo wallet (demo wallets only)",
+    tags=["User Wallets"]
+)
+async def add_demo_wallet_balance(
+    wallet_id: str,
+    request: AddBalanceRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Add balance to demo wallet.
+    
+    Only works for demo wallets. Allows manually adding funds
+    to the demo wallet for testing purposes.
+    """
+    from decimal import Decimal
+    from app.integrations.wallets.factory import get_wallet_factory
+    
+    try:
+        # Verify wallet ownership
+        user_wallet = await db.user_wallets.find_one({
+            "_id": ObjectId(wallet_id),
+            "user_id": str(current_user["_id"]),
+            "deleted_at": None
+        })
+        
+        if not user_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Wallet not found"
+            )
+        
+        # Check if it's a demo wallet
+        wallet_provider = await db.wallets.find_one({
+            "_id": ObjectId(user_wallet["wallet_provider_id"]),
+            "deleted_at": None
+        })
+        
+        if not wallet_provider:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Wallet provider not found"
+            )
+        
+        wallet_type = wallet_provider.get("slug", wallet_provider.get("integration_type", "")).split("-")[0]
+        
+        if wallet_type not in ["demo", "simulation"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This endpoint only works for demo wallets"
+            )
+        
+        # Create wallet instance
+        factory = get_wallet_factory()
+        wallet = await factory.create_wallet_from_db(db, wallet_id)
+        
+        # Add balance
+        result = await wallet.add_balance(
+            asset=request.asset,
+            amount=Decimal(str(request.amount)),
+            is_cash=request.is_cash
+        )
+        
+        # Sync balance to user_wallet after adding
+        try:
+            await service.sync_wallet_balance(
+                db=db,
+                user_wallet_id=wallet_id,
+                user_id=str(current_user["_id"])
+            )
+        except Exception as sync_error:
+            logger.warning(f"Failed to sync balance after adding funds: {sync_error}")
+            # Don't fail the request if sync fails - balance was still added to demo wallet
+        
+        logger.info(
+            f"User {current_user['email']} added {request.amount} {request.asset} "
+            f"to demo wallet {wallet_id}"
+        )
+        
+        return AddBalanceResponse(**result)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add balance: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

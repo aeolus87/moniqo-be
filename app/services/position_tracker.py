@@ -961,6 +961,18 @@ class PositionTrackerService:
     ) -> None:
         """Insert a transaction ledger entry for a position close."""
         try:
+            # Check if exit transaction already exists
+            transaction_type = "sell" if position.side == PositionSide.LONG else "buy"
+            existing = await self.db["transactions"].find_one({
+                "position_id": position.id,
+                "type": transaction_type,
+                "status": "filled"
+            })
+            
+            if existing:
+                logger.warning(f"Exit transaction already exists for position {position.id}, skipping duplicate")
+                return
+            
             exit_data = position.exit or {}
             pnl = Decimal(str(exit_data.get("realized_pnl", 0)))
             pnl_percent = Decimal(str(exit_data.get("realized_pnl_percent", 0)))
@@ -973,7 +985,7 @@ class PositionTrackerService:
                 "flow_id": position.flow_id,
                 "exchange": "wallet",
                 "symbol": position.symbol,
-                "type": "sell" if position.side == PositionSide.LONG else "buy",
+                "type": transaction_type,
                 "side": position.side.value,
                 "quantity": float(quantity),
                 "price": float(price),

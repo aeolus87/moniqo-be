@@ -447,4 +447,28 @@ class ResetDemoWalletResponse(BaseModel):
     """Demo wallet reset result"""
     success: bool
     message: str
-    new_balance: Dict[str, float]
+
+
+class AddBalanceRequest(BaseModel):
+    """Request to add balance to demo wallet"""
+    asset: str = Field(..., description="Asset symbol (e.g., 'USDT', 'BTC')")
+    amount: float = Field(..., gt=0, description="Amount to add")
+    is_cash: bool = Field(True, description="Is this a cash currency (USDT, USD) or asset (BTC, ETH)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "asset": "USDT",
+                "amount": 1000.0,
+                "is_cash": True
+            }
+        }
+
+
+class AddBalanceResponse(BaseModel):
+    """Add balance result"""
+    success: bool
+    asset: str
+    amount_added: float
+    new_balance: float
+    previous_balance: float

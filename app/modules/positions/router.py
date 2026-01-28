@@ -64,13 +64,28 @@ async def get_position(
                 raise HTTPException(status_code=401, detail="Not authenticated")
             user_id = demo_user_id
         
+        # Normalize user_id to ObjectId for comparison
+        user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
+        
         position = await Position.get(position_id)
         
         if not position:
             raise HTTPException(status_code=404, detail="Position not found")
         
+        # Check if position has user_id
+        if not position.user_id:
+            logger.error(f"Position {position_id} missing user_id")
+            raise HTTPException(status_code=500, detail="Position is missing user_id. Please contact support.")
+        
+        # Normalize position.user_id to ObjectId for comparison
+        position_user_id = ObjectId(position.user_id) if isinstance(position.user_id, str) else position.user_id
+        
         # Verify position belongs to user
-        if str(position.user_id) != str(user_id):
+        if position_user_id != user_id_obj:
+            logger.warning(
+                f"Access denied for position {position_id}: "
+                f"position.user_id={position_user_id} != user_id={user_id_obj}"
+            )
             raise HTTPException(status_code=403, detail="Access denied")
         
         if position.is_open():
@@ -296,13 +311,28 @@ async def update_position(
     try:
         user_id = current_user["_id"]
         
+        # Normalize user_id to ObjectId for comparison
+        user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
+        
         position = await Position.get(position_id)
         
         if not position:
             raise HTTPException(status_code=404, detail="Position not found")
         
+        # Check if position has user_id
+        if not position.user_id:
+            logger.error(f"Position {position_id} missing user_id")
+            raise HTTPException(status_code=500, detail="Position is missing user_id. Please contact support.")
+        
+        # Normalize position.user_id to ObjectId for comparison
+        position_user_id = ObjectId(position.user_id) if isinstance(position.user_id, str) else position.user_id
+        
         # Verify position belongs to user
-        if str(position.user_id) != str(user_id):
+        if position_user_id != user_id_obj:
+            logger.warning(
+                f"Access denied for position {position_id}: "
+                f"position.user_id={position_user_id} != user_id={user_id_obj}"
+            )
             raise HTTPException(status_code=403, detail="Access denied")
         
         # Check if position is open
@@ -408,16 +438,39 @@ async def close_position(
                 raise HTTPException(status_code=401, detail="Not authenticated")
             user_id = demo_user_id
         
+        # Normalize user_id to ObjectId for comparison
+        user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
+        
         position = await Position.get(position_id)
         
         if not position:
             raise HTTPException(status_code=404, detail="Position not found")
         
-        if str(position.user_id) != str(user_id):
+        # Check if position has user_id
+        if not position.user_id:
+            logger.error(f"Position {position_id} missing user_id")
+            raise HTTPException(status_code=500, detail="Position is missing user_id. Please contact support.")
+        
+        # Normalize position.user_id to ObjectId for comparison
+        position_user_id = ObjectId(position.user_id) if isinstance(position.user_id, str) else position.user_id
+        
+        if position_user_id != user_id_obj:
+            logger.warning(
+                f"Access denied for position {position_id}: "
+                f"position.user_id={position_user_id} (type: {type(position_user_id)}) != "
+                f"user_id={user_id_obj} (type: {type(user_id_obj)})"
+            )
             raise HTTPException(status_code=403, detail="Access denied")
         
         if not position.is_open():
             raise HTTPException(status_code=400, detail=f"Position cannot be closed. Current status: {position.status.value}")
+        
+        # Check if position already has exit data (already closed)
+        if position.exit:
+            raise HTTPException(
+                status_code=400, 
+                detail="Position already has exit data and cannot be closed again"
+            )
         
         entry_data = position.entry
         if not entry_data:
@@ -449,12 +502,31 @@ async def close_position(
         current_price = Decimal(str(current_price))
         reason = request.reason or "manual_close"
         
+        # Check if position already has an exit transaction
+        existing_exit_transaction = await db["transactions"].find_one({
+            "position_id": position.id,
+            "type": "sell" if position.side == PositionSide.LONG else "buy",
+            "status": "filled"
+        })
+        
+        if existing_exit_transaction:
+            raise HTTPException(
+                status_code=400, 
+                detail="Position already has a completed exit transaction and cannot be closed again"
+            )
+        
         await position.close(
             order_id=position.id,
             price=current_price,
             reason=reason,
             fees=Decimal("0")
         )
+        
+        # Reload position to get updated exit data
+        position = await Position.get(position_id)
+        if not position or not position.exit:
+            raise HTTPException(status_code=500, detail="Failed to close position - exit data not set")
+        
         try:
             await tracker_service._record_transaction(
                 position=position,
@@ -468,8 +540,34 @@ async def close_position(
         except Exception as e:
             logger.warning(f"Failed to record close transaction for position {position_id}: {e}")
         
-        realized_pnl = position.exit["realized_pnl"]
-        realized_pnl_percent = position.exit["realized_pnl_percent"]
+        # Update demo wallet balance with realized P&L
+        if position.user_wallet_id:
+            try:
+                from app.integrations.wallets.factory import get_wallet_factory
+                factory = get_wallet_factory()
+                wallet = await factory.create_wallet_from_db(db, str(position.user_wallet_id))
+                
+                # Check if it's a demo wallet
+                if hasattr(wallet, 'add_balance'):
+                    realized_pnl = position.exit.get("realized_pnl", Decimal("0"))
+                    if realized_pnl != 0:
+                        # Add realized P&L to wallet balance (positive or negative)
+                        await wallet.add_balance(
+                            asset="USDT",
+                            amount=realized_pnl,
+                            is_cash=True
+                        )
+                        logger.info(
+                            f"Added realized P&L {realized_pnl} USDT to demo wallet "
+                            f"{position.user_wallet_id} for position {position_id}"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to update demo wallet balance with P&L for position {position_id}: {e}"
+                )
+        
+        realized_pnl = position.exit.get("realized_pnl", Decimal("0"))
+        realized_pnl_percent = position.exit.get("realized_pnl_percent", Decimal("0"))
         
         logger.info(f"Position {position_id} closed by user {user_id}")
         
@@ -500,13 +598,28 @@ async def monitor_position(
     try:
         user_id = current_user["_id"]
         
+        # Normalize user_id to ObjectId for comparison
+        user_id_obj = ObjectId(user_id) if isinstance(user_id, str) else user_id
+        
         position = await Position.get(position_id)
         
         if not position:
             raise HTTPException(status_code=404, detail="Position not found")
         
+        # Check if position has user_id
+        if not position.user_id:
+            logger.error(f"Position {position_id} missing user_id")
+            raise HTTPException(status_code=500, detail="Position is missing user_id. Please contact support.")
+        
+        # Normalize position.user_id to ObjectId for comparison
+        position_user_id = ObjectId(position.user_id) if isinstance(position.user_id, str) else position.user_id
+        
         # Verify position belongs to user
-        if str(position.user_id) != str(user_id):
+        if position_user_id != user_id_obj:
+            logger.warning(
+                f"Access denied for position {position_id}: "
+                f"position.user_id={position_user_id} != user_id={user_id_obj}"
+            )
             raise HTTPException(status_code=403, detail="Access denied")
         
         # Monitor position

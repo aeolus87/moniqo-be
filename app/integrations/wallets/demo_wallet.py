@@ -98,8 +98,8 @@ class DemoWallet(BaseWallet):
         self.fee_rate = Decimal(str(fee_rate))
         self.slippage_rate = Decimal(str(slippage_rate))
         
-        # Initial balance
-        self.initial_balance = initial_balance or {"USDT": 10000.0}
+        # Initial balance (can be empty - user adds balance manually)
+        self.initial_balance = initial_balance or {}
         
         # Database
         self.db: Optional[AsyncIOMotorDatabase] = None
@@ -675,4 +675,54 @@ class DemoWallet(BaseWallet):
         transactions = transactions[-limit:]
         
         return transactions
+    
+    # ==================== MANUAL BALANCE OPERATIONS ====================
+    
+    async def add_balance(
+        self,
+        asset: str,
+        amount: Decimal,
+        is_cash: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Manually add balance to demo wallet.
+        
+        Args:
+            asset: Asset symbol (e.g., "USDT", "BTC")
+            amount: Amount to add
+            is_cash: Is this a cash currency (USDT, USD) or asset (BTC, ETH)
+            
+        Returns:
+            Dict with success status and new balance
+            
+        Example:
+            result = await wallet.add_balance("USDT", Decimal("1000"))
+            # result = {"success": True, "asset": "USDT", "new_balance": Decimal("1000")}
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+        
+        state = await self._load_state()
+        balance_key = "cash_balances" if is_cash else "asset_balances"
+        
+        current = Decimal(str(state[balance_key].get(asset, 0)))
+        new_balance = current + amount
+        
+        state[balance_key][asset] = float(new_balance)
+        
+        # Update starting balance if this is the first deposit
+        if sum(state["cash_balances"].values()) + sum(state["asset_balances"].values()) == float(new_balance):
+            state["starting_balance"] = float(new_balance) if is_cash else state["starting_balance"]
+        
+        await self._save_state(state)
+        
+        logger.info(f"Added {amount} {asset} to demo wallet {self.user_wallet_id}. New balance: {new_balance}")
+        
+        return {
+            "success": True,
+            "asset": asset,
+            "amount_added": float(amount),
+            "new_balance": float(new_balance),
+            "previous_balance": float(current)
+        }
 
