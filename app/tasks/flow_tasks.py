@@ -34,8 +34,14 @@ def _should_run_now(cron_expression: str) -> bool:
         cron = croniter(cron_expression, now)
         prev_run = cron.get_prev(datetime)
         
+        # Ensure prev_run is timezone-aware and in UTC
+        if prev_run.tzinfo is None:
+            prev_run = prev_run.replace(tzinfo=timezone.utc)
+        else:
+            prev_run = prev_run.astimezone(timezone.utc)
+        
         # Check if previous scheduled time is within the last 60 seconds
-        diff = (now - prev_run.replace(tzinfo=timezone.utc)).total_seconds()
+        diff = (now - prev_run).total_seconds()
         return diff < 60
     except Exception as e:
         logger.error(f"Invalid cron expression '{cron_expression}': {e}")

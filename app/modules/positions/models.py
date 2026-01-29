@@ -190,7 +190,16 @@ class Position(Document):
         
         # Calculate time held
         if self.opened_at:
-            time_diff = datetime.now(timezone.utc) - self.opened_at
+            # Ensure opened_at is timezone-aware and in UTC
+            opened_at_utc = self.opened_at
+            if opened_at_utc.tzinfo is None:
+                # Naive datetime - assume UTC
+                opened_at_utc = opened_at_utc.replace(tzinfo=timezone.utc)
+            else:
+                # Timezone-aware datetime - convert to UTC
+                opened_at_utc = opened_at_utc.astimezone(timezone.utc)
+            # Now both are UTC-aware, safe to subtract
+            time_diff = datetime.now(timezone.utc) - opened_at_utc
             self.current["time_held_minutes"] = int(time_diff.total_seconds() / 60)
         
         # Update risk level
@@ -258,7 +267,16 @@ class Position(Document):
         # Calculate time held
         time_held_minutes = 0
         if self.opened_at:
-            time_diff = datetime.now(timezone.utc) - self.opened_at
+            # Ensure opened_at is timezone-aware and in UTC
+            opened_at_utc = self.opened_at
+            if opened_at_utc.tzinfo is None:
+                # Naive datetime - assume UTC
+                opened_at_utc = opened_at_utc.replace(tzinfo=timezone.utc)
+            else:
+                # Timezone-aware datetime - convert to UTC
+                opened_at_utc = opened_at_utc.astimezone(timezone.utc)
+            # Now both are UTC-aware, safe to subtract
+            time_diff = datetime.now(timezone.utc) - opened_at_utc
             time_held_minutes = int(time_diff.total_seconds() / 60)
         
         # Create exit data

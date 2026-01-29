@@ -462,17 +462,22 @@ async def close_position(
             )
             raise HTTPException(status_code=403, detail="Access denied")
         
-        if not position.is_open():
-            raise HTTPException(status_code=400, detail=f"Position cannot be closed. Current status: {position.status.value}")
+        # Refresh position from database to avoid race conditions
+        refreshed_position = await Position.get(position_id)
+        if not refreshed_position:
+            raise HTTPException(status_code=404, detail="Position not found")
+        
+        if not refreshed_position.is_open():
+            raise HTTPException(status_code=400, detail=f"Position cannot be closed. Current status: {refreshed_position.status.value}")
         
         # Check if position already has exit data (already closed)
-        if position.exit:
+        if refreshed_position.exit:
             raise HTTPException(
                 status_code=400, 
                 detail="Position already has exit data and cannot be closed again"
             )
         
-        entry_data = position.entry
+        entry_data = refreshed_position.entry
         if not entry_data:
             raise HTTPException(status_code=500, detail="Position entry data missing")
         
@@ -480,20 +485,20 @@ async def close_position(
             entry_price = Decimal(str(entry_data.get("price")))
             entry_amount = Decimal(str(entry_data.get("amount")))
             entry_data["value"] = entry_price * entry_amount
-            position.entry = entry_data
-            await position.save()
+            refreshed_position.entry = entry_data
+            await refreshed_position.save()
 
         tracker_service = await get_position_tracker(db)
         current_price = None
-        user_wallet_id = position.user_wallet_id
+        user_wallet_id = refreshed_position.user_wallet_id
         
         if user_wallet_id:
-            monitor_result = await tracker_service.monitor_position(str(position.id))
+            monitor_result = await tracker_service.monitor_position(str(refreshed_position.id))
             if monitor_result["success"]:
                 current_price = monitor_result.get("current_price")
         
         if current_price is None:
-            current_data = position.current
+            current_data = refreshed_position.current
             current_price = current_data.get("price") if current_data else entry_data.get("price")
         
         if current_price is None:
@@ -504,8 +509,8 @@ async def close_position(
         
         # Check if position already has an exit transaction
         existing_exit_transaction = await db["transactions"].find_one({
-            "position_id": position.id,
-            "type": "sell" if position.side == PositionSide.LONG else "buy",
+            "position_id": refreshed_position.id,
+            "type": "sell" if refreshed_position.side == PositionSide.LONG else "buy",
             "status": "filled"
         })
         
@@ -515,8 +520,8 @@ async def close_position(
                 detail="Position already has a completed exit transaction and cannot be closed again"
             )
         
-        await position.close(
-            order_id=position.id,
+        await refreshed_position.close(
+            order_id=refreshed_position.id,
             price=current_price,
             reason=reason,
             fees=Decimal("0")

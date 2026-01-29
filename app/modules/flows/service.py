@@ -520,6 +520,38 @@ async def execute_flow(
     4. Run RiskManagerAgent
     5. Make final decision
     """
+    # EXECUTION SAFEGUARD #0: Refresh flow from database and check status
+    # Refresh to ensure we have the latest status (flow object might be stale)
+    if flow.id:
+        refreshed_flow = await get_flow_by_id(db, flow.id)
+        if not refreshed_flow:
+            logger.error(f"Flow {flow.id} not found in database")
+            execution = await create_execution(db, flow)
+            await update_execution(db, execution.id, {
+                "status": ExecutionStatus.FAILED.value,
+                "completed_at": datetime.now(timezone.utc),
+                "duration": 0,
+                "error": "Execution rejected: Flow not found in database"
+            })
+            return execution
+        flow = refreshed_flow
+    
+    # Only ACTIVE flows can execute - reject PAUSED or DISABLED flows
+    if flow.status != FlowStatus.ACTIVE:
+        logger.warning(
+            f"Flow {flow.id} ({flow.name}) execution rejected: flow is not active "
+            f"(status: {flow.status.value})"
+        )
+        # Create execution record to log the rejection
+        execution = await create_execution(db, flow)
+        await update_execution(db, execution.id, {
+            "status": ExecutionStatus.FAILED.value,
+            "completed_at": datetime.now(timezone.utc),
+            "duration": 0,
+            "error": f"Execution rejected: Flow is not active (status: {flow.status.value}). Flow must be ACTIVE to execute."
+        })
+        return execution
+    
     # EXECUTION SAFEGUARD #1: Atomic Lock Acquisition
 
     # Create execution record first (needed for execution_id in lock)
@@ -974,7 +1006,13 @@ async def execute_flow(
 
         if not proceed and not demo_force_position:
             completed_at = datetime.now(timezone.utc)
-            duration = int((completed_at - execution.started_at).total_seconds() * 1000)
+            # Ensure started_at is timezone-aware and in UTC
+            started_at_utc = execution.started_at
+            if started_at_utc.tzinfo is None:
+                started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+            else:
+                started_at_utc = started_at_utc.astimezone(timezone.utc)
+            duration = int((completed_at - started_at_utc).total_seconds() * 1000)
 
             result = ExecutionResult(
                 action="hold",
@@ -1099,7 +1137,13 @@ async def execute_flow(
 
         if not risk_rules_result["approved"] and not demo_force_position:
             completed_at = datetime.now(timezone.utc)
-            duration = int((completed_at - execution.started_at).total_seconds() * 1000)
+            # Ensure started_at is timezone-aware and in UTC
+            started_at_utc = execution.started_at
+            if started_at_utc.tzinfo is None:
+                started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+            else:
+                started_at_utc = started_at_utc.astimezone(timezone.utc)
+            duration = int((completed_at - started_at_utc).total_seconds() * 1000)
 
             result = ExecutionResult(
                 action="hold",
@@ -1481,20 +1525,34 @@ async def execute_flow(
                         # Check if price moved against us by more than 1%
                         if final_action == "buy" and price_change_pct > 1.0:
                             logger.warning(f"Price Staleness: BUY order canceled due to {price_change_pct:.2f}% price increase")
+                            # Ensure started_at is timezone-aware and in UTC
+                            started_at_utc = execution.started_at
+                            if started_at_utc.tzinfo is None:
+                                started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+                            else:
+                                started_at_utc = started_at_utc.astimezone(timezone.utc)
+                            completed_at_stale = datetime.now(timezone.utc)
                             await update_execution(db, execution.id, {
                                 "status": ExecutionStatus.FAILED.value,
-                                "completed_at": datetime.now(timezone.utc),
-                                "duration": int((datetime.now(timezone.utc) - execution.started_at).total_seconds() * 1000),
+                                "completed_at": completed_at_stale,
+                                "duration": int((completed_at_stale - started_at_utc).total_seconds() * 1000),
                                 "error": f"Price Staleness Error: Price increased {price_change_pct:.2f}% from {original_price} to {fresh_price} during analysis - canceling BUY order"
                             })
                             raise Exception(f"Price staleness: BUY order canceled due to {price_change_pct:.2f}% price increase")
 
                         elif final_action == "sell" and price_change_pct < -1.0:
                             logger.warning(f"Price Staleness: SELL order canceled due to {price_change_pct:.2f}% price decrease")
+                            # Ensure started_at is timezone-aware and in UTC
+                            started_at_utc = execution.started_at
+                            if started_at_utc.tzinfo is None:
+                                started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+                            else:
+                                started_at_utc = started_at_utc.astimezone(timezone.utc)
+                            completed_at_stale = datetime.now(timezone.utc)
                             await update_execution(db, execution.id, {
                                 "status": ExecutionStatus.FAILED.value,
-                                "completed_at": datetime.now(timezone.utc),
-                                "duration": int((datetime.now(timezone.utc) - execution.started_at).total_seconds() * 1000),
+                                "completed_at": completed_at_stale,
+                                "duration": int((completed_at_stale - started_at_utc).total_seconds() * 1000),
                                 "error": f"Price Staleness Error: Price decreased {price_change_pct:.2f}% from {original_price} to {fresh_price} during analysis - canceling SELL order"
                             })
                             raise Exception(f"Price staleness: SELL order canceled due to {price_change_pct:.2f}% price decrease")
@@ -1816,7 +1874,13 @@ async def execute_flow(
 
         # Complete execution
         completed_at = datetime.now(timezone.utc)
-        duration = int((completed_at - execution.started_at).total_seconds() * 1000)
+        # Ensure started_at is timezone-aware and in UTC
+        started_at_utc = execution.started_at
+        if started_at_utc.tzinfo is None:
+            started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+        else:
+            started_at_utc = started_at_utc.astimezone(timezone.utc)
+        duration = int((completed_at - started_at_utc).total_seconds() * 1000)
         
         result = ExecutionResult(
             action=final_action,

@@ -64,6 +64,24 @@ class PositionTrackerService:
         
         logger.info("Position tracker service initialized")
     
+    async def _is_flow_active(self, position: Position) -> bool:
+        """Check if the position's associated flow is active."""
+        if not position.flow_id:
+            # Positions without flow_id should still be monitored (legacy/orphaned)
+            return True
+        
+        try:
+            from app.modules.flows import service as flow_service
+            flow = await flow_service.get_flow_by_id(self.db, str(position.flow_id))
+            if not flow:
+                # Flow not found - allow monitoring (orphaned position)
+                return True
+            return flow.status == FlowStatus.ACTIVE
+        except Exception as e:
+            logger.warning(f"Failed to check flow status for position {position.id}: {e}")
+            # On error, allow monitoring (fail open)
+            return True
+    
     async def update_position_price(
         self,
         position_id: str,
@@ -94,6 +112,16 @@ class PositionTrackerService:
                     "success": False,
                     "error": "Position is not open"
                 }
+            
+            # Check if flow is active before updating
+            if position.flow_id:
+                if not await self._is_flow_active(position):
+                    logger.debug(f"Skipping price update for position {position_id} - flow is inactive")
+                    return {
+                        "success": True,
+                        "message": "Flow is inactive - price update skipped",
+                        "skipped": True
+                    }
             
             # Update price
             await position.update_price(current_price)
@@ -198,6 +226,23 @@ class PositionTrackerService:
                         "status": status
                     }
 
+                # Check if flow is active before monitoring (raw MongoDB path)
+                flow_id = doc.get("flow_id")
+                if flow_id:
+                    try:
+                        from app.modules.flows import service as flow_service
+                        flow = await flow_service.get_flow_by_id(self.db, str(flow_id))
+                        if flow and flow.status != FlowStatus.ACTIVE:
+                            logger.debug(f"Skipping monitoring for position {position_id} - flow is inactive")
+                            return {
+                                "success": True,
+                                "message": "Flow is inactive - monitoring skipped",
+                                "skipped": True
+                            }
+                    except Exception as e:
+                        logger.warning(f"Failed to check flow status for position {position_id}: {e}")
+                        # On error, continue monitoring (fail open)
+
                 symbol = doc.get("symbol")
                 current_price = None
 
@@ -257,8 +302,14 @@ class PositionTrackerService:
                 opened_at = doc.get("opened_at")
                 time_held_minutes = current.get("time_held_minutes", 0)
                 if isinstance(opened_at, datetime):
+                    # Ensure opened_at is timezone-aware and in UTC
                     if opened_at.tzinfo is None:
+                        # Naive datetime - assume UTC
                         opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    else:
+                        # Timezone-aware datetime - convert to UTC
+                        opened_at = opened_at.astimezone(timezone.utc)
+                    # Now both are UTC-aware, safe to subtract
                     time_held_minutes = int((now - opened_at).total_seconds() / 60)
                 current_update = {
                     "price": float(current_price),
@@ -358,6 +409,16 @@ class PositionTrackerService:
                     "status": position.status.value
                 }
             
+            # Check if flow is active before monitoring (Beanie path)
+            if position.flow_id:
+                if not await self._is_flow_active(position):
+                    logger.debug(f"Skipping monitoring for position {position_id} - flow is inactive")
+                    return {
+                        "success": True,
+                        "message": "Flow is inactive - monitoring skipped",
+                        "skipped": True
+                    }
+            
             current_price = None
             
             if position.user_wallet_id:
@@ -378,6 +439,10 @@ class PositionTrackerService:
             
             # Update position
             result = await self.update_position_price(str(position.id), current_price)
+            
+            # Skip AI monitoring if flow is inactive
+            if result.get("skipped"):
+                return result
 
             try:
                 base_symbol = position.symbol.split("/")[0] if "/" in position.symbol else position.symbol
@@ -420,11 +485,17 @@ class PositionTrackerService:
 
                 for rec in monitor_result.get("recommendations", []):
                     if rec.get("position_id") == str(position.id) and rec.get("action") in ["close", "exit"]:
-                        if position.user_wallet_id:
+                        # Refresh position from database to avoid race conditions
+                        refreshed_position = await Position.get(str(position.id))
+                        if not refreshed_position or not refreshed_position.is_open():
+                            logger.debug(f"Position {position.id} is no longer open, skipping AI close recommendation")
+                            break
+                        
+                        if refreshed_position.user_wallet_id:
                             try:
-                                wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+                                wallet_instance = await create_wallet_from_db(self.db, str(refreshed_position.user_wallet_id))
                                 await self._close_position_with_order(
-                                    position=position,
+                                    position=refreshed_position,
                                     wallet=wallet_instance,
                                     reason=rec.get("reason", "ai_signal"),
                                 )
@@ -534,6 +605,17 @@ class PositionTrackerService:
                     "error": "Position is not open"
                 }
             
+            # Check if flow is active before checking stop loss/take profit
+            if position.flow_id:
+                if not await self._is_flow_active(position):
+                    logger.debug(f"Skipping SL/TP check for position {position.id} - flow is inactive")
+                    return {
+                        "success": True,
+                        "triggered": None,
+                        "skipped": True,
+                        "reason": "Flow is inactive"
+                    }
+            
             if not position.current:
                 return {
                     "success": False,
@@ -620,15 +702,21 @@ class PositionTrackerService:
     async def _trigger_stop_loss(self, position: Position, current_price: Decimal):
         """Trigger stop loss for position"""
         try:
-            if not position.user_wallet_id:
+            # Refresh position from database to avoid race conditions
+            refreshed_position = await Position.get(str(position.id))
+            if not refreshed_position or not refreshed_position.is_open():
+                logger.debug(f"Position {position.id} is no longer open, skipping stop loss trigger")
+                return
+            
+            if not refreshed_position.user_wallet_id:
                 logger.error(f"Cannot trigger stop loss: position {position.id} has no user_wallet_id")
                 return
             
-            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+            wallet_instance = await create_wallet_from_db(self.db, str(refreshed_position.user_wallet_id))
             
             # Use centralized close method which handles order placement, fees, PnL recording, and flow statistics
             await self._close_position_with_order(
-                position=position,
+                position=refreshed_position,
                 wallet=wallet_instance,
                 reason="Stop Loss Triggered"
             )
@@ -641,15 +729,21 @@ class PositionTrackerService:
     async def _trigger_take_profit(self, position: Position, current_price: Decimal):
         """Trigger take profit for position"""
         try:
-            if not position.user_wallet_id:
+            # Refresh position from database to avoid race conditions
+            refreshed_position = await Position.get(str(position.id))
+            if not refreshed_position or not refreshed_position.is_open():
+                logger.debug(f"Position {position.id} is no longer open, skipping take profit trigger")
+                return
+            
+            if not refreshed_position.user_wallet_id:
                 logger.error(f"Cannot trigger take profit: position {position.id} has no user_wallet_id")
                 return
             
-            wallet_instance = await create_wallet_from_db(self.db, str(position.user_wallet_id))
+            wallet_instance = await create_wallet_from_db(self.db, str(refreshed_position.user_wallet_id))
             
             # Use centralized close method which handles order placement, fees, PnL recording, and flow statistics
             await self._close_position_with_order(
-                position=position,
+                position=refreshed_position,
                 wallet=wallet_instance,
                 reason="Take Profit Triggered"
             )
