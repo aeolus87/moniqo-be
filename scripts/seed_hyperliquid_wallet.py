@@ -65,20 +65,28 @@ async def seed_hyperliquid_wallet():
             "supported_assets": ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "ADA", "AVAX", "MATIC", "LINK"],
             "auth_fields": [
                 {
-                    "key": "private_key",
-                    "label": "Private Key",
-                    "type": "password",
-                    "required": True,
-                    "encrypted": True,
-                    "description": "Wallet private key (0x-prefixed hex string, 66 characters)"
-                },
-                {
-                    "key": "wallet_address",
-                    "label": "Wallet Address",
+                    "key": "account_address",
+                    "label": "Account Address (Main Wallet)",
                     "type": "text",
                     "required": True,
                     "encrypted": False,
-                    "description": "Wallet address (0x-prefixed hex string, 42 characters)"
+                    "description": "Main Hyperliquid wallet address where funds are stored (0x-prefixed hex, 42 chars). This is the address the Agent will trade on behalf of."
+                },
+                {
+                    "key": "private_key",
+                    "label": "Agent Private Key",
+                    "type": "password",
+                    "required": True,
+                    "encrypted": True,
+                    "description": "Agent private key (0x-prefixed hex, 66 chars). This key can trade but cannot withdraw. Must be approved via Hyperliquid UI before use."
+                },
+                {
+                    "key": "wallet_address",
+                    "label": "Wallet Address (Deprecated)",
+                    "type": "text",
+                    "required": False,
+                    "encrypted": False,
+                    "description": "DEPRECATED: Use 'account_address' instead. Kept for backward compatibility."
                 }
             ],
             "capabilities": {

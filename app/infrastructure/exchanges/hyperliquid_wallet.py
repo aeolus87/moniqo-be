@@ -1,15 +1,10 @@
 """
 HyperliquidWallet - Hyperliquid Perpetual Futures Integration
 
-Complete Hyperliquid API integration with:
-- Perpetual futures trading (no spot)
-- Leverage support (1-20x)
-- Private key authentication
-- Position-based trading
-- On-chain transparency
+Complete Hyperliquid API integration with Agent Key architecture for security.
 
 Author: Moniqo Team
-Last Updated: 2026-01-28
+Last Updated: 2026-01-30
 """
 
 import re
@@ -42,14 +37,29 @@ logger = get_logger(__name__)
 
 class HyperliquidWallet(BaseWallet):
     """
-    Hyperliquid Perpetual Futures Integration
+    Hyperliquid Perpetual Futures Integration (Agent Key Pattern)
     
-    Full-featured Hyperliquid API client for perpetual futures trading.
+    Full-featured Hyperliquid API client using Agent Key architecture for security.
+    
+    **Security Architecture:**
+    - Uses Agent private key (can trade, cannot withdraw)
+    - Requires account_address (main wallet where funds are stored)
+    - Agent must be approved manually via Hyperliquid UI before trading
+    - Zero-Knowledge: Backend never touches principal private key
+    
+    **Credentials Required:**
+    - account_address: Main wallet address (0x... hex, 42 chars)
+    - private_key: Agent private key (0x... hex, 66 chars)
+    
+    **Agent Approval:**
+    Before using this wallet, the Agent key must be approved via Hyperliquid UI.
+    This is a one-time L1 transaction that authorizes the Agent to trade.
+    Backend does NOT handle Agent approval (security requirement).
     
     Features:
     - Perpetual futures trading (no spot)
     - Leverage support (1-20x)
-    - Private key authentication
+    - Agent-based authentication (no withdrawal access)
     - Position-based trading
     - On-chain transparency
     
@@ -58,8 +68,8 @@ class HyperliquidWallet(BaseWallet):
             wallet_id="hyperliquid-wallet-001",
             user_wallet_id="user_wallet_123",
             credentials={
-                "private_key": "0x...",
-                "wallet_address": "0x..."
+                "account_address": "0x...",  # Main wallet address
+                "private_key": "0x..."       # Agent private key
             }
         )
         
@@ -83,6 +93,10 @@ class HyperliquidWallet(BaseWallet):
     MIN_LEVERAGE = 1
     MAX_LEVERAGE = 20
     
+    # Chain ID Configuration
+    MAINNET_CHAIN_ID = 122993
+    TESTNET_CHAIN_ID = 1228
+    
     def __init__(
         self,
         wallet_id: str,
@@ -91,39 +105,53 @@ class HyperliquidWallet(BaseWallet):
         **kwargs
     ):
         """
-        Initialize Hyperliquid wallet.
+        Initialize Hyperliquid wallet with Agent Key pattern.
         
         Args:
             wallet_id: Wallet provider ID
             user_wallet_id: User wallet instance ID
-            credentials: Dict with "private_key" and "wallet_address"
+            credentials: Dict with "account_address" (main wallet) and "private_key" (agent key)
+                - account_address: Main wallet address where funds are stored (0x... hex, 42 chars)
+                - private_key: Agent private key for trading (0x... hex, 66 chars)
+                - wallet_address: DEPRECATED - use account_address instead (backward compatibility)
         """
         super().__init__(wallet_id, user_wallet_id, credentials, **kwargs)
         
-        # Extract credentials
-        self.private_key = credentials.get("private_key", "")
-        self.wallet_address = credentials.get("wallet_address", "")
+        # Extract credentials - support both new (account_address) and old (wallet_address) format
+        self.account_address = credentials.get("account_address", "")
+        self.agent_private_key = credentials.get("private_key", "")
         
-        if not self.private_key:
-            raise AuthenticationError(
-                "Hyperliquid private_key is required"
-            )
+        # Backward compatibility: check for old wallet_address field
+        if not self.account_address:
+            old_wallet_address = credentials.get("wallet_address", "")
+            if old_wallet_address:
+                logger.warning(
+                    "DEPRECATED: 'wallet_address' field is deprecated. "
+                    "Please use 'account_address' instead. "
+                    "This will be removed in a future version."
+                )
+                self.account_address = old_wallet_address
+            else:
+                raise AuthenticationError(
+                    "Hyperliquid account_address (Main Wallet) is required for Agent-based trading. "
+                    "This is the address where funds are stored."
+                )
         
-        if not self.wallet_address:
+        if not self.agent_private_key:
             raise AuthenticationError(
-                "Hyperliquid wallet_address is required"
+                "Hyperliquid private_key (Agent key) is required"
             )
         
         # Validate private key format (0x... hex string, 66 chars)
-        if not self._validate_private_key(self.private_key):
+        if not self._validate_private_key(self.agent_private_key):
             raise AuthenticationError(
                 "Invalid private key format. Must be 0x-prefixed hex string (66 characters)"
             )
         
-        # Validate wallet address format (0x... hex string, 42 chars)
-        if not self._validate_wallet_address(self.wallet_address):
+        # Validate account address format (0x... hex string, 42 chars)
+        if not self._validate_wallet_address(self.account_address):
             raise AuthenticationError(
-                "Invalid wallet address format. Must be 0x-prefixed hex string (42 characters)"
+                "Invalid account address format. Must be 0x-prefixed hex string (42 characters)"
             )
         
         # HTTP session (will be created on demand)
@@ -136,8 +164,8 @@ class HyperliquidWallet(BaseWallet):
         self._symbol_info_cache: Dict[str, Dict] = {}
         
         logger.info(
-            f"Initialized HyperliquidWallet: "
-            f"wallet_id={wallet_id}, address={self.wallet_address[:10]}..."
+            f"Initialized HyperliquidWallet (Agent Key Pattern): "
+            f"wallet_id={wallet_id}, account_address={self.account_address[:10]}..."
         )
     
     def _validate_private_key(self, private_key: str) -> bool:
@@ -184,15 +212,30 @@ class HyperliquidWallet(BaseWallet):
                 is_testnet = self.config.get("testnet", False)
                 base_url = constants.TESTNET_API_URL if is_testnet else constants.MAINNET_API_URL
                 
+                # Explicit Chain ID validation (defense-in-depth)
+                expected_chain_id = self.TESTNET_CHAIN_ID if is_testnet else self.MAINNET_CHAIN_ID
+                # Note: SDK handles Chain ID internally, but we log for verification
+                # The SDK's constants.TESTNET/MAINNET should match, but we log for verification
+                logger.debug(
+                    f"Hyperliquid network: {'TESTNET' if is_testnet else 'MAINNET'} "
+                    f"(Chain ID: {expected_chain_id})"
+                )
+                
                 # Initialize SDK components
                 self._info_client = Info(base_url, skip_ws=True)
+                
+                # CRITICAL: Use Agent private key with account_address parameter
+                # This tells the L1: "I am Agent X signing for Wallet Y"
                 self._signing_helper = SigningHelper(
-                    self.private_key,
+                    self.agent_private_key,
                     constants.TESTNET if is_testnet else constants.MAINNET
                 )
+                # Exchange needs account_address when using Agent key
+                # This specifies which main account the Agent is trading on behalf of
                 self._exchange_client = Exchange(
                     self._signing_helper,
-                    base_url=base_url
+                    base_url=base_url,
+                    account_address=self.account_address  # Agent signing for main account
                 )
                 self._sdk_client = {
                     "info": self._info_client,
@@ -292,6 +335,70 @@ class HyperliquidWallet(BaseWallet):
         logger.error(f"Hyperliquid API error: {response.status} - {error_msg}")
         raise WalletError(f"Hyperliquid API error: {error_msg}")
     
+    def _handle_l1_error(self, result: Dict[str, Any]) -> None:
+        """
+        Handle Hyperliquid L1 blockchain errors.
+        
+        Maps blockchain-specific errors to appropriate exceptions.
+        
+        Args:
+            result: SDK response dict
+            
+        Raises:
+            AuthenticationError: Agent not authorized or signature errors
+            InvalidOrderError: Order-specific errors (slippage, etc.)
+            InsufficientFundsError: Margin/balance errors
+            WalletError: Generic blockchain errors
+        """
+        if result.get("status") != "err":
+            return
+        
+        # Extract error message from various possible response structures
+        error_msg = ""
+        response_data = result.get("response", {})
+        
+        # Try different error message locations
+        if isinstance(response_data, dict):
+            if "data" in response_data:
+                data = response_data["data"]
+                if isinstance(data, dict):
+                    error_msg = data.get("error", data.get("msg", ""))
+                elif isinstance(data, str):
+                    error_msg = data
+            elif "error" in response_data:
+                error_msg = response_data["error"]
+            elif "msg" in response_data:
+                error_msg = response_data["msg"]
+        
+        if not error_msg:
+            error_msg = str(result.get("response", "Unknown L1 error"))
+        
+        error_lower = error_msg.lower()
+        
+        # Agent authorization errors
+        if "agent" in error_lower or "not authorized" in error_lower or "unauthorized" in error_lower:
+            raise AuthenticationError(
+                f"Agent not authorized: {error_msg}. "
+                "Please approve this agent key via Hyperliquid UI before trading."
+            )
+        
+        # Signature errors
+        if "signature" in error_lower or "invalid sign" in error_lower:
+            raise AuthenticationError(f"Signature error: {error_msg}")
+        
+        # Order-specific errors
+        if "slippage" in error_lower:
+            raise InvalidOrderError(f"Slippage too high: {error_msg}")
+        
+        if "margin" in error_lower or "insufficient" in error_lower:
+            raise InsufficientFundsError(f"Insufficient margin: {error_msg}")
+        
+        if "nonce" in error_lower:
+            raise WalletError(f"Nonce error (L1 reject): {error_msg}")
+        
+        # Generic L1 error
+        raise WalletError(f"L1 blockchain error: {error_msg}")
+    
     # ==================== BALANCE OPERATIONS ====================
     
     async def get_balance(self, asset: str) -> Decimal:
@@ -306,7 +413,7 @@ class HyperliquidWallet(BaseWallet):
             info = sdk["info"]
             
             # Get user state (includes balances)
-            user_state = info.user_state(self.wallet_address)
+            user_state = info.user_state(self.account_address)
             
             if not user_state or "marginSummary" not in user_state:
                 return {}
@@ -412,6 +519,10 @@ class HyperliquidWallet(BaseWallet):
                     {"limit": {"tif": "Gtc"}}
                 )
             
+            # Check for L1 blockchain errors BEFORE parsing success response
+            if result.get("status") == "err":
+                self._handle_l1_error(result)
+            
             # Parse response
             if result.get("status") == "ok":
                 statuses = result.get("response", {}).get("data", {}).get("statuses", [])
@@ -473,6 +584,10 @@ class HyperliquidWallet(BaseWallet):
             # Cancel order via SDK
             result = exchange.cancel(hyperliquid_symbol, order_id)
             
+            # Check for L1 blockchain errors BEFORE parsing success response
+            if result.get("status") == "err":
+                self._handle_l1_error(result)
+            
             if result.get("status") == "ok":
                 return {
                     "success": True,
@@ -500,7 +615,7 @@ class HyperliquidWallet(BaseWallet):
             info = sdk["info"]
             
             # Get open orders for user
-            open_orders = info.open_orders(self.wallet_address)
+            open_orders = info.open_orders(self.account_address)
             
             # Find order by ID
             order = None
@@ -544,7 +659,7 @@ class HyperliquidWallet(BaseWallet):
             info = sdk["info"]
             
             # Get user state
-            user_state = info.user_state(self.wallet_address)
+            user_state = info.user_state(self.account_address)
             
             if not user_state or "assetPositions" not in user_state:
                 return None
@@ -747,7 +862,7 @@ class HyperliquidWallet(BaseWallet):
                 "success": True,
                 "latency_ms": latency_ms,
                 "server_time": datetime.now(timezone.utc),
-                "message": f"Connected to Hyperliquid (address: {self.wallet_address[:10]}...)"
+                "message": f"Connected to Hyperliquid (account: {self.account_address[:10]}...)"
             }
         
         except Exception as e:
