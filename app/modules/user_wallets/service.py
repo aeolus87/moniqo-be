@@ -677,11 +677,132 @@ async def sync_wallet_balance(
             f"(duration: {sync_duration_ms}ms, changes: {len(changes)} assets)"
         )
         
+        # DEPOSIT DETECTION & FLOW TRIGGERING (AI AUTONOMY)
+        deposit_detected = False
+        deposit_amount_usd = 0.0
+        triggered_flows = []
+        
+        if changes:
+            # Check for positive balance changes (deposits)
+            # Convert changes to USD for threshold checking
+            try:
+                # Get current price for major assets (USDT, USD, BTC, ETH)
+                from app.infrastructure.market_data.binance_client import BinanceClient
+                async with BinanceClient() as binance_client:
+                    usdt_price = 1.0  # USDT/USD is always ~1
+                    
+                    # Calculate total deposit in USD
+                    for asset, diff in changes.items():
+                        if diff > 0:  # Positive change = deposit
+                            deposit_detected = True
+                            if asset in ["USDT", "USD", "USDC"]:
+                                deposit_amount_usd += diff * usdt_price
+                            elif asset == "BTC":
+                                try:
+                                    btc_price = await binance_client.get_price("BTC/USDT")
+                                    deposit_amount_usd += diff * float(btc_price)
+                                except:
+                                    logger.warning(f"Could not fetch BTC price for deposit calculation")
+                            elif asset == "ETH":
+                                try:
+                                    eth_price = await binance_client.get_price("ETH/USDT")
+                                    deposit_amount_usd += diff * float(eth_price)
+                                except:
+                                    logger.warning(f"Could not fetch ETH price for deposit calculation")
+                            else:
+                                # For other assets, use a conservative estimate or skip
+                                logger.debug(f"Deposit detected for {asset}: {diff}, but USD conversion skipped")
+            except Exception as e:
+                logger.warning(f"Failed to calculate deposit amount in USD: {e}")
+                # Still mark as deposit if we have positive changes
+                if any(diff > 0 for diff in changes.values()):
+                    deposit_detected = True
+        
+        # Trigger flows if deposit detected and amount > threshold ($10)
+        DEPOSIT_THRESHOLD_USD = 10.0
+        if deposit_detected and deposit_amount_usd >= DEPOSIT_THRESHOLD_USD:
+            logger.info(
+                f"Deposit detected: ${deposit_amount_usd:.2f} USD for user {user_id}. "
+                f"Triggering active flows..."
+            )
+            
+            try:
+                # Find and trigger active flows for this user
+                from app.modules.flows import service as flow_service
+                from app.modules.flows.models import FlowStatus
+                from bson import ObjectId
+                
+                # Query active flows for this user
+                active_flows = await db.flows.find({
+                    "config.user_id": str(user_id),
+                    "status": FlowStatus.ACTIVE.value,
+                    "config.auto_loop_enabled": True,  # Only trigger flows with auto-loop enabled
+                }).to_list(length=100)
+                
+                if active_flows:
+                    logger.info(f"Found {len(active_flows)} active flows for user {user_id}")
+                    
+                    # Trigger each flow (with throttling to prevent spam)
+                    for flow_doc in active_flows:
+                        flow_id = str(flow_doc["_id"])
+                        
+                        # Throttle: Check last execution time (prevent triggers within 30 seconds)
+                        try:
+                            last_execution = await db.executions.find_one(
+                                {"flow_id": ObjectId(flow_id)},
+                                sort=[("started_at", -1)]
+                            )
+                            
+                            if last_execution:
+                                last_execution_time = last_execution.get("started_at")
+                                if last_execution_time:
+                                    time_since_last = (datetime.now(timezone.utc) - last_execution_time).total_seconds()
+                                    if time_since_last < 30:  # 30 second throttle
+                                        logger.debug(
+                                            f"Skipping flow {flow_id} trigger: "
+                                            f"last execution was {time_since_last:.1f}s ago (< 30s throttle)"
+                                        )
+                                        continue
+                        except Exception as throttle_error:
+                            logger.warning(f"Failed to check throttle for flow {flow_id}: {throttle_error}")
+                            # Continue anyway - throttle check failure shouldn't block trigger
+                        
+                        # Trigger flow execution
+                        try:
+                            flow = await flow_service.get_flow_by_id(db, flow_id)
+                            if flow and flow.status == FlowStatus.ACTIVE:
+                                # Trigger execution asynchronously to avoid blocking sync
+                                import asyncio
+                                asyncio.create_task(
+                                    flow_service.execute_flow(flow, "groq", None)
+                                )
+                                triggered_flows.append(flow_id)
+                                logger.info(f"Triggered flow {flow_id} ({flow.name}) due to deposit")
+                        except Exception as trigger_error:
+                            logger.error(f"Failed to trigger flow {flow_id} after deposit: {trigger_error}")
+                            # Continue with other flows - don't fail sync if trigger fails
+                    
+                    if triggered_flows:
+                        logger.info(
+                            f"Deposit-triggered execution: {len(triggered_flows)} flows triggered "
+                            f"for user {user_id} (deposit: ${deposit_amount_usd:.2f} USD)"
+                        )
+                else:
+                    logger.debug(f"No active flows found for user {user_id}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to trigger flows after deposit detection: {e}")
+                # Don't fail sync if flow triggering fails
+        
         return {
             "success": True,
             "balances": balances,
             "sync_duration_ms": sync_duration_ms,
             "synced_at": datetime.now(timezone.utc),
+            "changes": changes,
+            "deposit_detected": deposit_detected,
+            "deposit_amount_usd": deposit_amount_usd if deposit_detected else 0.0,
+            "triggered_flows": triggered_flows,
             "changes": changes if changes else None,
             "error": None
         }

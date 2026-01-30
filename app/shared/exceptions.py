@@ -219,6 +219,17 @@ class DatabaseError(AppException):
         super().__init__(message=message, code="DATABASE_ERROR", status_code=500)
 
 
+class DatabaseAuthorizationError(AppException):
+    """Database authorization error - user lacks required permissions."""
+    
+    def __init__(self, message: str = "Database authorization failed. Please check MongoDB user permissions."):
+        super().__init__(
+            message=message,
+            code="DATABASE_AUTHORIZATION_ERROR",
+            status_code=503
+        )
+
+
 # General Exceptions
 
 class BadRequestError(AppException):

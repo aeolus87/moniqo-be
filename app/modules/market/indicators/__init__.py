@@ -20,6 +20,10 @@ from app.modules.market.indicators.calculator import (
     calculate_all_indicators,
     IndicatorResult,
 )
+from app.modules.market.indicators.semantic_enricher import (
+    enrich_indicator_with_semantics,
+    enrich_indicators_dict,
+)
 
 __all__ = [
     "calculate_sma",
@@ -30,4 +34,6 @@ __all__ = [
     "calculate_atr",
     "calculate_all_indicators",
     "IndicatorResult",
+    "enrich_indicator_with_semantics",
+    "enrich_indicators_dict",
 ]

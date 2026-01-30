@@ -17,6 +17,7 @@ from app.shared.exceptions import (
     UserNotFoundError,
     TokenExpiredError,
     InvalidTokenError,
+    DatabaseAuthorizationError,
 )
 from app.modules.auth import service as auth_service
 from app.modules.auth.schemas import (
@@ -82,6 +83,14 @@ async def register(
         logger.warning(f"Registration failed: {str(e)}")
         return error_json_response(
             status_code=status.HTTP_400_BAD_REQUEST,
+            message="Registration failed",
+            error_code=e.code,
+            error_message=str(e)
+        )
+    except DatabaseAuthorizationError as e:
+        logger.error(f"Database authorization error during registration: {str(e)}")
+        return error_json_response(
+            status_code=e.status_code,
             message="Registration failed",
             error_code=e.code,
             error_message=str(e)

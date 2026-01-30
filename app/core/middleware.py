@@ -52,6 +52,11 @@ class TradingModeMiddleware(BaseHTTPMiddleware):
         Returns:
             Response: HTTP response
         """
+        # CRITICAL: Skip middleware for OPTIONS requests (CORS preflight)
+        # CORS middleware must handle OPTIONS requests before this middleware
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        
         # Skip middleware for certain paths (health checks, docs, etc.)
         if self._should_skip_middleware(request.url.path):
             return await call_next(request)

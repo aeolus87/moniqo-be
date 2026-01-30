@@ -8,7 +8,9 @@ from datetime import datetime
 from typing import Optional
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import OperationFailure
 from app.utils.logger import get_logger
+from app.shared.exceptions import DatabaseAuthorizationError
 
 logger = get_logger(__name__)
 
@@ -49,6 +51,16 @@ async def create_auth(
         auth_data["_id"] = result.inserted_id
         logger.info(f"Auth record created: email={email}, id={result.inserted_id}")
         return auth_data
+    except OperationFailure as e:
+        # Check for MongoDB authorization errors (code 13)
+        if e.code == 13 or "not authorized" in str(e).lower() or "unauthorized" in str(e).lower():
+            logger.error(f"MongoDB authorization error: {str(e)}")
+            raise DatabaseAuthorizationError(
+                f"MongoDB authorization failed: {str(e)}. "
+                "Please ensure the MongoDB user has read/write permissions on the database."
+            )
+        logger.error(f"Failed to create auth record: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"Failed to create auth record: {str(e)}")
         raise

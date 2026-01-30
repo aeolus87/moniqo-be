@@ -45,7 +45,9 @@ class PyObjectId(ObjectId):
                     ),
                 ]),
             ]),
-            serialization=core_schema.plain_serializer_function_lambda_instance(str),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda x: str(x), info_arg=False
+            ),
         )
 
 

@@ -90,6 +90,8 @@ class ExecutionResult(BaseModel):
     confidence: float
     reasoning: str
     position_id: Optional[str] = None
+    rationale: Optional[str] = None  # Full decision trace: concatenated reasoning from all agents
+    decision_trace: Optional[List[str]] = None  # Step-by-step decision trace for audit
 
 
 class Flow(BaseModel):

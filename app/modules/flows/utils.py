@@ -120,8 +120,29 @@ def resolve_order_quantity(
     order_size_usd: Optional[Decimal],
     order_size_percent: Optional[Decimal],
     default_balance_percent: Decimal,
+    ai_position_size_usd: Optional[Decimal] = None,
+    ai_position_size_percent: Optional[Decimal] = None,
 ) -> Tuple[Decimal, Dict[str, Any]]:
-    """Resolve order quantity using balances and sizing rules."""
+    """
+    Resolve order quantity using balances and sizing rules.
+    
+    Priority: AI-provided sizing > explicit order_quantity > order_size_usd/percent > default_balance_percent
+    
+    Args:
+        action: Trading action ("buy" or "sell")
+        current_price: Current market price
+        base_balance: Base asset balance
+        quote_balance: Quote asset balance
+        order_quantity: Explicit quantity (highest priority if provided)
+        order_size_usd: USD size from config
+        order_size_percent: Percent size from config
+        default_balance_percent: Default balance percent fallback
+        ai_position_size_usd: AI-provided position size in USD (optional)
+        ai_position_size_percent: AI-provided position size as percent (optional)
+    
+    Returns:
+        Tuple of (quantity, sizing_metadata)
+    """
     if current_price <= 0:
         raise Exception("Cannot resolve quantity without a valid current price")
 
@@ -130,16 +151,54 @@ def resolve_order_quantity(
         "quote_balance": float(quote_balance) if quote_balance is not None else None,
     }
 
+    # Priority 1: Explicit order_quantity (highest priority)
     if order_quantity is not None:
+        sizing_meta["sizing_method"] = "explicit_quantity"
         return order_quantity, sizing_meta
 
+    # Priority 2: AI-provided sizing (AI AUTONOMY)
+    if ai_position_size_usd is not None:
+        sizing_meta["sizing_method"] = "ai_usd"
+        sizing_meta["ai_position_size_usd"] = float(ai_position_size_usd)
+        if action == "buy":
+            if quote_balance is None:
+                raise Exception("Quote balance unavailable for buy sizing")
+            # Cap AI sizing to available balance
+            order_size_usd = min(ai_position_size_usd, quote_balance)
+            sizing_meta["order_size_usd"] = float(order_size_usd)
+            return order_size_usd / current_price, sizing_meta
+        else:  # sell
+            if base_balance is None:
+                raise Exception("Base balance unavailable for sell sizing")
+            quantity = ai_position_size_usd / current_price
+            return min(quantity, base_balance), sizing_meta
+    
+    if ai_position_size_percent is not None:
+        sizing_meta["sizing_method"] = "ai_percent"
+        sizing_meta["ai_position_size_percent"] = float(ai_position_size_percent)
+        if action == "buy":
+            if quote_balance is None:
+                raise Exception("Quote balance unavailable for buy sizing")
+            order_size_usd = (ai_position_size_percent / Decimal("100")) * quote_balance
+            order_size_usd = min(order_size_usd, quote_balance)
+            sizing_meta["order_size_usd"] = float(order_size_usd)
+            return order_size_usd / current_price, sizing_meta
+        else:  # sell
+            if base_balance is None:
+                raise Exception("Base balance unavailable for sell sizing")
+            quantity = (ai_position_size_percent / Decimal("100")) * base_balance
+            return min(quantity, base_balance), sizing_meta
+
+    # Priority 3: Config-based sizing (fallback)
     if action == "buy":
         if quote_balance is None:
             raise Exception("Quote balance unavailable for buy sizing")
         if order_size_percent is not None:
             order_size_usd = (order_size_percent / Decimal("100")) * quote_balance
-            sizing_meta["sizing_method"] = "percent"
-        elif order_size_usd is None:
+            sizing_meta["sizing_method"] = "config_percent"
+        elif order_size_usd is not None:
+            sizing_meta["sizing_method"] = "config_usd"
+        else:
             order_size_usd = (default_balance_percent / Decimal("100")) * quote_balance
             sizing_meta["sizing_method"] = "default_percent"
         order_size_usd = min(order_size_usd, quote_balance)
@@ -149,10 +208,10 @@ def resolve_order_quantity(
     if base_balance is None:
         raise Exception("Base balance unavailable for sell sizing")
     if order_size_percent is not None:
-        sizing_meta["sizing_method"] = "percent"
+        sizing_meta["sizing_method"] = "config_percent"
         quantity = (order_size_percent / Decimal("100")) * base_balance
     elif order_size_usd is not None:
-        sizing_meta["sizing_method"] = "usd"
+        sizing_meta["sizing_method"] = "config_usd"
         quantity = order_size_usd / current_price
     else:
         sizing_meta["sizing_method"] = "default_percent"

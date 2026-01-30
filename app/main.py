@@ -302,14 +302,32 @@ app = FastAPI(
 )
 
 # Configure CORS
+# Default origins for development (Vite dev server on 5173, React on 3000)
+default_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+# Get CORS origins from settings or use defaults
+cors_origins = default_cors_origins
+if settings:
+    try:
+        cors_origins = settings.cors_origins_list
+        logger.info(f"CORS origins loaded from settings: {cors_origins}")
+    except Exception as e:
+        logger.warning(f"Failed to load CORS origins from settings: {e}, using defaults: {default_cors_origins}")
+else:
+    logger.warning(f"Settings not initialized, using default CORS origins: {default_cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list if settings else ["http://localhost:3000", "http://localhost:5173"],
-        # allow_origins=settings.CORS_ORIGINS if settings else ["http://localhost:3000", "http://localhost:5173"],
-
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Add Trading Mode Middleware (after CORS, before routers)

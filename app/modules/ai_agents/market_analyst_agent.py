@@ -66,7 +66,10 @@ class MarketAnalystAgent(BaseAgent):
                 "price_target": 50000.00,
                 "stop_loss": 49000.00,
                 "take_profit": 52000.00,
-                "risk_level": "low" | "medium" | "high"
+                "risk_level": "low" | "medium" | "high",
+                "leverage": 1-20 (optional),
+                "position_size_usd": 100.0 (optional),
+                "position_size_percent": 10.0 (optional)
             }
         """
         try:
@@ -108,6 +111,23 @@ class MarketAnalystAgent(BaseAgent):
                     "risk_level": {
                         "type": "string",
                         "enum": ["low", "medium", "high"]
+                    },
+                    "leverage": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Recommended leverage multiplier (1-20x). Use higher leverage for high-conviction trades with aligned signals. Use lower leverage for uncertain or conflicting signals."
+                    },
+                    "position_size_usd": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Recommended position size in USD. Use larger sizes for high conviction, smaller sizes for uncertainty. If not provided, system will use default sizing."
+                    },
+                    "position_size_percent": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Recommended position size as percentage of available balance (0-100). Alternative to position_size_usd."
                     }
                 },
                 "required": ["action", "confidence", "reasoning"]
@@ -198,11 +218,25 @@ Analyze the market for {symbol} and provide a trading recommendation.
 **Technical Indicators:**
 """
         
+        # Use semantic indicators if available (INSTITUTIONAL GRADE)
         if indicators:
-            prompt += "\n".join([
-                f"- {key}: {value}"
-                for key, value in indicators.items()
-            ])
+            semantic_indicators = indicators.get("semantic_indicators", [])
+            if semantic_indicators:
+                # Use human-readable semantic descriptions
+                prompt += "\n".join([
+                    f"- {desc}"
+                    for desc in semantic_indicators
+                ])
+            else:
+                # Fallback to raw indicators
+                raw_indicators = indicators.get("indicators", [])
+                if raw_indicators:
+                    prompt += "\n".join([
+                        f"- {ind.get('name', 'Unknown')}: {ind.get('value', 'N/A')} ({ind.get('signal', 'neutral')})"
+                        for ind in raw_indicators
+                    ])
+                else:
+                    prompt += "- No indicators provided"
         else:
             prompt += "- No indicators provided"
         
@@ -253,18 +287,72 @@ Analyze the market for {symbol} and provide a trading recommendation.
         
         prompt += """
 **Your Task:**
-1. Analyze the current market conditions using technical indicators
-2. READ the Reddit headlines above - look for news about hacks, regulations, FUD, or bullish catalysts
-3. Consider Polymarket odds as "smart money" - real money is betting on price direction
-4. Cross-reference technical signals with Reddit sentiment and Polymarket odds
-5. Provide a clear trading recommendation (buy/sell/hold)
-6. Suggest price targets, stop loss, and take profit levels
+1. **Multi-Timeframe Analysis:**
+   - Use 1h timeframe for trend direction (primary trend)
+   - Use 15m timeframe for entry timing (if available)
+   - Confirm trend alignment across timeframes before high-confidence trades
+
+2. **Read External Signals:**
+   - READ the Reddit headlines above - look for news about hacks, regulations, FUD, or bullish catalysts
+   - Consider Polymarket odds as "smart money" - real money is betting on price direction
+   - PolyMarket odds > Reddit sentiment in weight (real money > noise)
+
+3. **Cross-Validation:**
+   - Cross-reference technical signals with Reddit sentiment and Polymarket odds
+   - If signals conflict, REDUCE confidence and favor HOLD
+   - Only trade when technicals AND external signals align
+
+4. **Provide Recommendation:**
+   - Clear trading recommendation (buy/sell/hold)
+   - Confidence score (0-100) reflecting signal strength
+   - Price targets, stop loss, and take profit levels
+
+5. **Leverage Decision (CRITICAL - AI AUTONOMY):**
+   - **High Leverage (5-20x):** Use when ALL signals align AND confidence >= 80%
+     * Technical indicators strongly bullish/bearish
+     * Polymarket odds > 65% (for buys) or < 35% (for sells)
+     * Reddit sentiment confirms direction (no FUD/hacks)
+     * Low volatility environment (tight stops possible)
+   - **Medium Leverage (2-5x):** Use when signals mostly align AND confidence >= 70%
+     * Technical indicators favorable
+     * Polymarket odds 50-65% (for buys) or 35-50% (for sells)
+     * Reddit sentiment neutral to positive
+   - **Low Leverage (1-2x):** Use when signals conflict OR confidence < 70%
+     * Mixed technical signals
+     * Polymarket odds 40-60% (uncertain)
+     * Reddit sentiment mixed or unavailable
+     * High volatility environment
+   - **Default to 1x leverage** if uncertain or conflicting signals
+   - **NEVER exceed 20x** - system will cap at wallet maximum
+
+6. **Position Sizing Decision (CRITICAL - AI AUTONOMY):**
+   - **Large Position (position_size_percent: 15-30%):** Use when:
+     * High confidence (>= 80%) AND all signals aligned
+     * Low risk environment (clear trend, tight stops)
+     * Polymarket odds strongly favor direction (> 70% or < 30%)
+   - **Medium Position (position_size_percent: 5-15%):** Use when:
+     * Moderate confidence (70-80%)
+     * Signals mostly aligned but some uncertainty
+     * Standard market conditions
+   - **Small Position (position_size_percent: 1-5%):** Use when:
+     * Lower confidence (< 70%)
+     * Conflicting signals
+     * High volatility or uncertain market
+   - **Consider wallet balance:** Ensure position_size_usd doesn't exceed available balance
+   - If not specified, system will use default sizing from config
+
+7. **The "No-Trade" Reward:**
+   - **CRITICAL:** Staying in cash during choppy/low-probability markets is a WINNING MOVE
+   - If market conditions are unclear or conflicting, HOLD is the correct decision
+   - Do NOT force trades - quality over quantity
+   - Reward yourself mentally for identifying "no-trade" environments
 
 **Critical Instructions:**
 - If Reddit headlines mention HACKS, EXPLOITS, or MAJOR NEGATIVE NEWS, strongly consider HOLD regardless of technicals
-- If Polymarket "BTC Up" odds are below 40%, treat this as a strong bearish signal
-- If Polymarket "BTC Up" odds are above 60%, treat this as a strong bullish confirmation
+- If Polymarket "BTC Up" odds are below 40%, treat this as a strong bearish signal - REDUCE confidence or HOLD
+- If Polymarket "BTC Up" odds are above 60%, treat this as a strong bullish confirmation - INCREASE confidence
 - Use the headlines to confirm or QUESTION your technical analysis - don't ignore social signals
+- **Confidence Threshold:** Only recommend trades with confidence >= 70%. Below 70%, default to HOLD
 - Be concise but thorough in your analysis
 """
         
@@ -283,10 +371,29 @@ Your responsibilities:
 - Cross-reference technical indicators with external sentiment signals
 
 Guidelines:
-- Be conservative with confidence scores
-- Always recommend stop-loss and take-profit levels
-- Consider market volatility in your analysis
-- Focus on data-driven decisions, not emotions
+- **Confidence Scoring:** Be conservative with confidence scores. Only assign >= 70% confidence when signals are STRONG and ALIGNED
+- **Multi-Timeframe:** Always consider trend direction (1h) and entry timing (15m) when available
+- **Risk Management:** Always recommend stop-loss and take-profit levels
+- **Volatility Awareness:** Consider market volatility (ATR) in your analysis - high volatility = wider stops
+- **Data-Driven:** Focus on data-driven decisions, not emotions
+- **Hold is Valid:** Remember - choosing HOLD in uncertain markets is PROFESSIONAL, not cowardice
+
+**Leverage Decision Guidelines (AI AUTONOMY):**
+- Leverage amplifies both gains AND losses - use responsibly
+- High leverage (5-20x) ONLY when: confidence >= 80%, all signals aligned, low volatility, clear trend
+- Medium leverage (2-5x) when: confidence 70-80%, mostly aligned signals
+- Low leverage (1-2x) when: confidence < 70%, conflicting signals, high volatility
+- Default to 1x if uncertain - preserving capital is more important than maximizing gains
+- Consider Polymarket odds: > 65% or < 35% = higher leverage acceptable, 40-60% = lower leverage
+
+**Position Sizing Guidelines (AI AUTONOMY):**
+- Position size should reflect conviction level, not just signal strength
+- Large positions (15-30% of balance): Only for highest conviction trades (confidence >= 80%, all signals aligned)
+- Medium positions (5-15%): Standard sizing for moderate confidence trades
+- Small positions (1-5%): For lower confidence or uncertain markets
+- Always consider risk: larger positions require tighter risk management
+- If Polymarket odds strongly favor direction (> 70% or < 30%), consider larger position
+- If Reddit shows FUD/hacks, reduce position size regardless of technicals
 
 External Social & Prediction Signals - READ CAREFULLY:
 1. Reddit Headlines Analysis:

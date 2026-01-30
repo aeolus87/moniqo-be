@@ -69,6 +69,7 @@ from app.modules.flows.swarm_coordinator import (
     usage_delta as _usage_delta,
     aggregate_usage as _aggregate_usage,
     aggregate_swarm_results as _aggregate_swarm_results,
+    run_swarm_analysis as _run_swarm_analysis,
 )
 from app.modules.flows.statistics import update_flow_statistics as _update_flow_statistics
 from app.modules.flows.orchestrator import (
@@ -952,6 +953,9 @@ async def execute_flow(
                     "agreement": swarm_aggregate["agreement"],
                     "is_unanimous": swarm_aggregate["is_unanimous"],
                     "min_agreement": swarm_min_agreement,
+                    "min_confidence_threshold": swarm_min_confidence,
+                    "confidence_threshold_met": swarm_aggregate.get("confidence_threshold_met", True),
+                    "decision_trace": decision_trace,  # INSTITUTIONAL GRADE: Full trace
                 },
             }
             analyst_duration_ms = int(sum(r["duration_ms"] for r in swarm_results) / swarm_runs)
@@ -1193,6 +1197,8 @@ async def execute_flow(
                 action="hold",
                 confidence=pre_trade_confidence,
                 reasoning=pre_trade_reasoning,
+                rationale=pre_trade_reasoning,  # Full trace for pre-trade gate
+                decision_trace=[f"PRE_TRADE_GATE: {pre_trade_reasoning}"],
             )
 
             await update_execution(db, execution.id, {
@@ -1324,6 +1330,8 @@ async def execute_flow(
                 action="hold",
                 confidence=0.0,
                 reasoning=risk_rules_reasoning,
+                rationale=risk_rules_reasoning,  # Full trace for risk rules rejection
+                decision_trace=[f"RISK_RULES: {risk_rules_reasoning}"],
             )
 
             await update_execution(db, execution.id, {
@@ -1475,19 +1483,44 @@ async def execute_flow(
         final_action = "hold"
         final_confidence = 0.0
         final_reasoning = ""
+        
+        # INSTITUTIONAL GRADE: Build full decision trace (rationale) for "Why did we lose money?" audit
+        decision_trace_parts = []
+        
+        # Add market analysis trace
+        if flow.mode == FlowMode.SWARM and analysis_result.get("swarm", {}).get("decision_trace"):
+            decision_trace_parts.extend(analysis_result["swarm"]["decision_trace"])
+        else:
+            decision_trace_parts.append(
+                f"MARKET_ANALYST: {analysis_action.upper()} "
+                f"(confidence: {analysis_confidence:.2f}) - {analysis_reasoning[:200]}"
+            )
+        
+        # Add Risk Manager trace
+        decision_trace_parts.append(
+            f"RISK_MANAGER: {'APPROVED' if risk_action == 'approve' else 'VETO'} "
+            f"(risk_score: {risk_score:.2f}, confidence: {risk_confidence:.2f}) - {risk_reasoning[:200]}"
+        )
+        
         total_ai_cost_usd = round(
             float(analyst_usage.get("cost_usd", 0.0)) + float(risk_usage.get("cost_usd", 0.0)),
             6,
         )
         
+        # RISK MANAGER VETO POWER (INSTITUTIONAL GRADE)
         if risk_action == "approve":
             final_action = effective_action
             final_confidence = analysis_confidence * risk_confidence
             final_reasoning = f"Market Analysis: {analysis_reasoning}. Risk Assessment: {risk_reasoning}"
         else:
+            # VETO: Risk Manager rejected - force HOLD regardless of market analysis
             final_action = "hold"
             final_confidence = risk_confidence
-            final_reasoning = f"Trade rejected by Risk Manager: {risk_reasoning}"
+            final_reasoning = f"Trade rejected by Risk Manager VETO: {risk_reasoning}"
+            decision_trace_parts.append("VETO APPLIED: Risk Manager rejected trade. Forcing HOLD.")
+        
+        # Build full rationale (concatenated reasoning from all agents)
+        full_rationale = "\n".join(decision_trace_parts)
 
         if demo_force_position:
             if final_action == "hold":
@@ -1643,6 +1676,22 @@ async def execute_flow(
             order_size_percent = Decimal(str(order_size_percent)) if order_size_percent is not None else None
             default_balance_percent = Decimal(str(execution_config.get("order_balance_percent", 10)))
 
+            # Extract AI-provided position sizing (AI AUTONOMY)
+            ai_position_size_usd = None
+            ai_position_size_percent = None
+            if flow.mode == FlowMode.SWARM and analysis_result.get("swarm", {}).get("position_size_usd"):
+                ai_position_size_usd = Decimal(str(analysis_result["swarm"]["position_size_usd"]))
+                logger.info(f"AI Swarm provided position size: ${ai_position_size_usd} USD")
+            elif flow.mode == FlowMode.SWARM and analysis_result.get("swarm", {}).get("position_size_percent"):
+                ai_position_size_percent = Decimal(str(analysis_result["swarm"]["position_size_percent"]))
+                logger.info(f"AI Swarm provided position size: {ai_position_size_percent}%")
+            elif analysis_result.get("position_size_usd"):
+                ai_position_size_usd = Decimal(str(analysis_result["position_size_usd"]))
+                logger.info(f"AI Market Analyst provided position size: ${ai_position_size_usd} USD")
+            elif analysis_result.get("position_size_percent"):
+                ai_position_size_percent = Decimal(str(analysis_result["position_size_percent"]))
+                logger.info(f"AI Market Analyst provided position size: {ai_position_size_percent}%")
+
             current_price = Decimal(str(market_context.get("current_price", 0)))
             
             # For simulated trades, use default sizing
@@ -1660,7 +1709,7 @@ async def execute_flow(
                 }
                 logger.info(f"Simulated trade - Using ${default_order_usd} order size = {quantity} {base_asset}")
             else:
-                # Use actual wallet balances
+                # Use actual wallet balances with AI-provided sizing (if available)
                 quantity, sizing_meta = _resolve_order_quantity(
                     action=final_action,
                     current_price=current_price,
@@ -1670,8 +1719,14 @@ async def execute_flow(
                     order_size_usd=order_size_usd,
                     order_size_percent=order_size_percent,
                     default_balance_percent=default_balance_percent,
+                    ai_position_size_usd=ai_position_size_usd,
+                    ai_position_size_percent=ai_position_size_percent,
                 )
-                logger.info(f"Real wallet trade - Quantity: {quantity} {base_asset}, Method: {sizing_meta.get('sizing_method', 'unknown')}")
+                sizing_method = sizing_meta.get('sizing_method', 'unknown')
+                if sizing_method.startswith('ai_'):
+                    logger.info(f"Real wallet trade - Quantity: {quantity} {base_asset}, Method: {sizing_method} (AI-controlled)")
+                else:
+                    logger.info(f"Real wallet trade - Quantity: {quantity} {base_asset}, Method: {sizing_method} (config-based)")
 
                 # Balance checks only for real trades
                 if final_action == "buy" and quote_balance is not None:
@@ -1754,13 +1809,32 @@ async def execute_flow(
                 else:
                     logger.warning("Could not fetch fresh price for staleness check")
 
-            # Resolve leverage from config (for both simulated and real trades)
-            leverage = _resolve_leverage(
-                execution_config=execution_config,
-                wallet_capabilities=wallet_capabilities if not is_simulated else {},
-                default_leverage=1
-            )
-            logger.info(f"Resolved leverage: {leverage}x for {flow.symbol}")
+            # Resolve leverage: AI-provided first, then config fallback (for both simulated and real trades)
+            ai_leverage = None
+            if flow.mode == FlowMode.SWARM and analysis_result.get("swarm", {}).get("leverage"):
+                ai_leverage = analysis_result["swarm"]["leverage"]
+                logger.info(f"AI Swarm provided leverage: {ai_leverage}x for {flow.symbol}")
+            elif analysis_result.get("leverage"):
+                ai_leverage = analysis_result["leverage"]
+                logger.info(f"AI Market Analyst provided leverage: {ai_leverage}x for {flow.symbol}")
+            
+            if ai_leverage is not None:
+                # Validate AI leverage against wallet max_leverage
+                max_leverage = wallet_capabilities.get("max_leverage", 20) if not is_simulated else 20
+                if ai_leverage > max_leverage:
+                    logger.warning(f"AI leverage {ai_leverage}x exceeds wallet max {max_leverage}x, capping to {max_leverage}x")
+                    ai_leverage = max_leverage
+                leverage = ai_leverage
+            else:
+                # Fall back to config-based leverage resolution
+                leverage = _resolve_leverage(
+                    execution_config=execution_config,
+                    wallet_capabilities=wallet_capabilities if not is_simulated else {},
+                    default_leverage=1
+                )
+                logger.info(f"Using config-based leverage: {leverage}x for {flow.symbol} (AI did not provide leverage)")
+            
+            logger.info(f"Final resolved leverage: {leverage}x for {flow.symbol}")
             
             # Place real order or simulate
             if is_simulated:
@@ -2102,6 +2176,8 @@ async def execute_flow(
             confidence=final_confidence,
             reasoning=final_reasoning,
             position_id=position_record["_id"] if position_record else None,
+            rationale=full_rationale,  # INSTITUTIONAL GRADE: Full decision trace
+            decision_trace=decision_trace_parts,  # INSTITUTIONAL GRADE: Step-by-step trace
         )
         
         # Complete risk validation step

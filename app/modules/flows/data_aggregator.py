@@ -11,6 +11,7 @@ import time
 
 from app.infrastructure.market_data import get_binance_client
 from app.modules.market.indicators import calculate_all_indicators
+from app.modules.market.indicators.semantic_enricher import enrich_indicators_dict
 from app.modules.market.signal_aggregator import get_signal_aggregator
 from app.utils.logger import get_logger
 
@@ -215,7 +216,7 @@ async def aggregate_market_intelligence(symbol: str) -> Dict[str, Any]:
     market_data = await fetch_market_data(symbol)
     
     # Calculate indicators
-    indicators = calculate_indicators(
+    raw_indicators = calculate_indicators(
         market_data["closes"],
         market_data["highs"],
         market_data["lows"]
@@ -223,14 +224,18 @@ async def aggregate_market_intelligence(symbol: str) -> Dict[str, Any]:
     
     # Build market context
     ticker = market_data["ticker"]
+    current_price = float(ticker.price)
     market_context = {
         "symbol": symbol,
-        "current_price": float(ticker.price),
+        "current_price": current_price,
         "high_24h": float(ticker.high_24h),
         "low_24h": float(ticker.low_24h),
         "change_24h_percent": float(ticker.change_percent_24h),
         "volume_24h": float(ticker.volume_24h),
     }
+    
+    # Enrich indicators with semantic meaning (INSTITUTIONAL GRADE)
+    indicators = enrich_indicators_dict(raw_indicators, current_price=current_price)
     
     # Fetch aggregated sentiment signal
     signal_data = await fetch_aggregated_signal(symbol)

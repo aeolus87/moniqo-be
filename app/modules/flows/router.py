@@ -95,6 +95,8 @@ def execution_to_response(execution) -> ExecutionResponse:
             confidence=execution.result.confidence,
             reasoning=execution.result.reasoning,
             position_id=execution.result.position_id,
+            rationale=execution.result.rationale,
+            decision_trace=execution.result.decision_trace,
         )
     
     return ExecutionResponse(

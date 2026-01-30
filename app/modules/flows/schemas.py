@@ -73,6 +73,8 @@ class ExecutionResultResponse(BaseModel):
     confidence: float
     reasoning: str
     positionId: Optional[str] = Field(None, alias="position_id")
+    rationale: Optional[str] = Field(None, description="Full decision trace: concatenated reasoning from all agents")
+    decisionTrace: Optional[List[str]] = Field(None, alias="decision_trace", description="Step-by-step decision trace for audit")
 
     class Config:
         populate_by_name = True
