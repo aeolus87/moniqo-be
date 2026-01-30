@@ -7,7 +7,7 @@ Business logic for permission operations.
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.modules.permissions import models as permission_models
 from app.modules.permissions.schemas import PermissionCreate, PermissionUpdate, PermissionResponse
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

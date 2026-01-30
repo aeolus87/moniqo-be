@@ -16,7 +16,7 @@ from app.modules.ai_agents.market_analyst_agent import MarketAnalystAgent
 from app.modules.ai_agents.risk_manager_agent import RiskManagerAgent
 from app.modules.ai_agents.executor_agent import ExecutorAgent
 from app.modules.ai_agents.monitor_agent import MonitorAgent
-from app.integrations.ai.factory import get_model_factory
+from app.infrastructure.ai_providers.factory import get_model_factory
 from app.utils.logger import get_logger
 import os
 

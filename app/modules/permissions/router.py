@@ -7,10 +7,10 @@ API endpoints for permission operations.
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_active_superuser
 from app.core.responses import success_response, error_response, paginated_response
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.modules.permissions import service as permission_service
 from app.modules.permissions.schemas import PermissionCreate, PermissionUpdate, PermissionResponse
 from app.utils.pagination import get_pagination_params
@@ -40,7 +40,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_permission(
     permission_data: PermissionCreate,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create a new permission.
@@ -92,7 +92,7 @@ async def list_permissions(
     limit: int = Query(10, description="Number of items per page"),
     offset: int = Query(0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List all permissions (paginated).
@@ -144,7 +144,7 @@ async def list_permissions(
 async def get_permission(
     permission_id: str,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get permission by ID.
@@ -195,7 +195,7 @@ async def update_permission(
     permission_id: str,
     permission_data: PermissionUpdate,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update permission by ID.
@@ -246,7 +246,7 @@ async def update_permission(
 async def delete_permission(
     permission_id: str,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Delete permission by ID (soft delete).

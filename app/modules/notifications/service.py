@@ -8,7 +8,7 @@ from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.modules.notifications.models import Notification
 from app.modules.notifications.schemas import NotificationCreate
-from app.core.exceptions import ResourceNotFoundError
+from app.shared.exceptions import ResourceNotFoundError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

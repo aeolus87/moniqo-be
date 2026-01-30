@@ -7,7 +7,7 @@ Business logic for role operations.
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.modules.roles import models as role_models
 from app.modules.roles.schemas import RoleCreate, RoleUpdate, RoleResponse
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

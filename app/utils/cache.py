@@ -9,7 +9,7 @@ Last Updated: 2025-11-22
 
 import redis.asyncio as redis
 from typing import Optional
-from app.config.settings import get_settings
+from app.core.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

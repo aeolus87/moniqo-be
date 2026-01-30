@@ -8,12 +8,11 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from typing import Optional
-from app.config import get_database
 from app.core.responses import success_response, error_response
 from app.core.dependencies import get_current_user, require_permission
 from app.modules.notifications.schemas import NotificationCreate, NotificationResponse
 from app.modules.notifications import service as notifications_service
-from app.core.exceptions import ResourceNotFoundError
+from app.shared.exceptions import ResourceNotFoundError
 from app.utils.logger import get_logger
 from app.utils.pagination import get_pagination_params, create_paginated_response
 
@@ -42,7 +41,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_notification(
     notification_data: NotificationCreate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create a new notification for the current user.
@@ -82,7 +81,7 @@ async def list_notifications(
     is_read: Optional[bool] = Query(None, description="Filter by read status"),
     type: Optional[str] = Query(None, description="Filter by notification type"),
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List current user's notifications with pagination and filters.
@@ -126,7 +125,7 @@ async def list_notifications(
 )
 async def get_unread_count(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get count of unread notifications for current user.
@@ -162,7 +161,7 @@ async def get_unread_count(
 async def get_notification(
     notification_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get notification by ID (must belong to current user).
@@ -207,7 +206,7 @@ async def get_notification(
 async def mark_notification_as_read(
     notification_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Mark notification as read (must belong to current user).
@@ -251,7 +250,7 @@ async def mark_notification_as_read(
 )
 async def mark_all_as_read(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Mark all unread notifications as read for current user.
@@ -287,7 +286,7 @@ async def mark_all_as_read(
 async def delete_notification(
     notification_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Soft delete notification (must belong to current user).

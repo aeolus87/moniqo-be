@@ -8,10 +8,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_user, validate_object_id
 from app.core.responses import success_response, error_response, paginated_response
-from app.core.exceptions import ValidationError, NotFoundError
+from app.shared.exceptions import ValidationError, NotFoundError
 from app.modules.credentials import service as credential_service
 from app.modules.credentials.schemas import (
     CreateCredentialsRequest,
@@ -46,7 +46,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_credentials(
     credentials_data: CreateCredentialsRequest,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create new wallet credentials.
@@ -112,7 +112,7 @@ async def list_credentials(
     limit: int = Query(100, ge=1, le=5000, description="Number of items per page"),
     offset: int = Query(0, ge=0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List user's credentials.
@@ -175,7 +175,7 @@ async def list_credentials(
 async def get_credentials(
     credentials_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get credential details by ID.
@@ -233,7 +233,7 @@ async def update_credentials(
     credentials_id: str,
     update_data: UpdateCredentialsRequest,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update credentials.
@@ -301,7 +301,7 @@ async def update_credentials(
 async def delete_credentials(
     credentials_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Delete credentials (soft delete).
@@ -358,7 +358,7 @@ async def delete_credentials(
 async def test_connection(
     credentials_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Test connection with credentials.

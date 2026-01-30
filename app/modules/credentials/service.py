@@ -7,7 +7,7 @@ Business logic for credential operations.
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.core.exceptions import ValidationError, NotFoundError
+from app.shared.exceptions import ValidationError, NotFoundError
 from app.modules.credentials import models as credential_models
 from app.modules.credentials.encryption import encrypt_credentials, decrypt_credentials
 from app.modules.credentials.schemas import (

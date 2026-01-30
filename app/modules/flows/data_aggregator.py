@@ -9,9 +9,9 @@ Author: Moniqo Team
 from typing import Optional, Dict, Any, Tuple
 import time
 
-from app.integrations.market_data import get_binance_client
-from app.services.indicators import calculate_all_indicators
-from app.services.signal_aggregator import get_signal_aggregator
+from app.infrastructure.market_data import get_binance_client
+from app.modules.market.indicators import calculate_all_indicators
+from app.modules.market.signal_aggregator import get_signal_aggregator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -136,7 +136,7 @@ async def fetch_polymarket_odds(symbol: str) -> Optional[Dict[str, Any]]:
         Polymarket data dict or None if unavailable
     """
     try:
-        from app.integrations.market_data.polymarket_client import get_polymarket_client
+        from app.infrastructure.market_data.polymarket_market_data_client import get_polymarket_client
         base_symbol = symbol.split("/")[0] if "/" in symbol else symbol
         
         if base_symbol.upper() != "BTC":
@@ -182,7 +182,7 @@ async def fetch_reddit_sentiment(symbol: str) -> Optional[Dict[str, Any]]:
         Reddit sentiment data dict or None if unavailable
     """
     try:
-        from app.integrations.market_data.reddit_client import get_reddit_client
+        from app.infrastructure.market_data.reddit_market_data_client import get_reddit_client
         base_symbol = symbol.split("/")[0] if "/" in symbol else symbol
         cache_key = f"reddit:{base_symbol.upper()}"
         

@@ -15,7 +15,7 @@ from decimal import Decimal
 from enum import Enum
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_user_optional
 from app.modules.flows.schemas import (
     FlowCreate,
@@ -121,7 +121,7 @@ def execution_to_response(execution) -> ExecutionResponse:
 )
 async def create_flow(
     flow_data: FlowCreate,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Create a new flow"""
     try:
@@ -142,7 +142,7 @@ async def list_flows(
     limit: int = Query(10, ge=1, le=100, description="Items per page"),
     offset: int = Query(0, ge=0, description="Items to skip"),
     status: Optional[FlowStatus] = Query(None, description="Filter by status"),
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """List all flows"""
     try:
@@ -168,7 +168,7 @@ async def list_flows(
 )
 async def get_flow(
     flow_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get flow by ID"""
     flow = await flow_service.get_flow_by_id(db, flow_id)
@@ -188,7 +188,7 @@ async def get_flow(
 async def update_flow(
     flow_id: str,
     updates: FlowUpdate,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Update flow"""
     existing = await flow_service.get_flow_by_id(db, flow_id)
@@ -215,7 +215,7 @@ async def update_flow(
 )
 async def delete_flow(
     flow_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Delete flow"""
     existing = await flow_service.get_flow_by_id(db, flow_id)
@@ -238,7 +238,7 @@ async def delete_flow(
 async def start_flow_endpoint(
     flow_id: str,
     trigger_request: Optional[TriggerFlowRequest] = None,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     """
@@ -307,7 +307,7 @@ async def start_flow_endpoint(
 )
 async def stop_flow_endpoint(
     flow_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """
     Stop continuous trading flow.
@@ -347,7 +347,7 @@ async def stop_flow_endpoint(
 async def trigger_flow(
     flow_id: str,
     trigger_request: Optional[TriggerFlowRequest] = None,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     """Trigger a single flow execution (use /start for continuous trading)"""
@@ -381,7 +381,7 @@ async def trigger_flow(
         model_name = trigger_request.model_name if trigger_request else None
         
         execution = await flow_service.execute_flow(
-            db, flow, model_provider, model_name
+            flow, model_provider, model_name
         )
         
         return execution_to_response(execution)
@@ -400,7 +400,7 @@ async def get_flow_executions(
     flow_id: str,
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get executions for a flow"""
     flow = await flow_service.get_flow_by_id(db, flow_id)
@@ -429,7 +429,7 @@ async def get_flow_executions(
 async def list_all_executions(
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """List all executions"""
     executions, total = await flow_service.get_executions(db, None, limit, offset)
@@ -451,7 +451,7 @@ async def list_all_executions(
 )
 async def delete_execution(
     execution_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Delete execution by ID"""
     existing = await flow_service.get_execution_by_id(db, execution_id)
@@ -471,7 +471,7 @@ async def delete_execution(
 )
 async def get_execution(
     execution_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get execution by ID"""
     execution = await flow_service.get_execution_by_id(db, execution_id)
@@ -489,7 +489,7 @@ async def get_execution(
     description="Delete all executions across all flows",
 )
 async def delete_all_executions(
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Delete all executions"""
     await flow_service.delete_all_executions(db)
@@ -506,7 +506,7 @@ async def delete_all_executions(
 async def list_agent_decisions(
     execution_id: Optional[str] = Query(None, description="Filter by execution ID"),
     limit: int = Query(50, ge=1, le=200),
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """List agent decisions"""
     decisions = await flow_service.get_agent_decisions(db, execution_id, limit)
@@ -524,3 +524,246 @@ async def list_agent_decisions(
         )
         for d in decisions
     ]
+
+
+# ==================== SAFETY ENDPOINTS ====================
+
+@router.post(
+    "/emergency-stop",
+    summary="Emergency Stop",
+    description="Halt all active trading flows immediately",
+)
+async def emergency_stop(
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    """
+    Emergency stop all trading.
+    
+    This will:
+    - Stop all active flows for the user
+    - Set emergency_stop flag to prevent new trades
+    - NOT close existing positions (manual action required)
+    """
+    from app.modules.risk_rules.circuit_breaker import get_circuit_breaker_service
+    from bson import ObjectId
+    from datetime import datetime, timezone
+    
+    try:
+        user_id = str(current_user["_id"]) if current_user else None
+        
+        # Stop all active flows
+        stopped_flows = []
+        flows_collection = db.flows
+        
+        # Build query - filter by user if authenticated
+        query = {"status": "active"}
+        if user_id:
+            query["$or"] = [
+                {"config.user_id": user_id},
+                {"config.user_id": ObjectId(user_id)},
+            ]
+        
+        async for flow in flows_collection.find(query):
+            flow_id = str(flow["_id"])
+            await flow_service.stop_flow(db, flow_id)
+            stopped_flows.append(flow_id)
+            logger.warning(f"Emergency stop: stopped flow {flow_id}")
+        
+        # Set emergency stop flag in safety_status
+        if user_id:
+            now = datetime.now(timezone.utc)
+            await db.safety_status.update_many(
+                {"user_id": ObjectId(user_id)},
+                {
+                    "$set": {
+                        "emergency_stop": True,
+                        "emergency_stop_at": now,
+                        "updated_at": now,
+                    }
+                }
+            )
+        
+        logger.warning(
+            f"Emergency stop activated: user={user_id}, "
+            f"stopped_flows={len(stopped_flows)}"
+        )
+        
+        return {
+            "success": True,
+            "message": "Emergency stop activated",
+            "stopped_flows": stopped_flows,
+            "stopped_count": len(stopped_flows),
+        }
+        
+    except Exception as e:
+        logger.error(f"Emergency stop failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Emergency stop failed: {str(e)}")
+
+
+@router.post(
+    "/emergency-reset",
+    summary="Reset Emergency Stop",
+    description="Reset emergency stop and allow trading to resume",
+)
+async def emergency_reset(
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    """
+    Reset emergency stop state.
+    
+    This will:
+    - Clear emergency_stop flag
+    - Reset circuit breaker
+    - Clear cooldowns
+    - Allow trading to resume
+    """
+    from app.modules.risk_rules.circuit_breaker import get_circuit_breaker_service
+    from bson import ObjectId
+    from datetime import datetime, timezone
+    
+    try:
+        user_id = str(current_user["_id"]) if current_user else None
+        
+        if user_id:
+            now = datetime.now(timezone.utc)
+            
+            # Reset all safety flags for user's wallets
+            await db.safety_status.update_many(
+                {"user_id": ObjectId(user_id)},
+                {
+                    "$set": {
+                        "emergency_stop": False,
+                        "emergency_stop_at": None,
+                        "circuit_breaker_tripped": False,
+                        "circuit_breaker_reason": None,
+                        "circuit_breaker_until": None,
+                        "consecutive_losses": 0,
+                        "cooldown_until": None,
+                        "cooldown_reason": None,
+                        "updated_at": now,
+                    }
+                }
+            )
+        
+        logger.info(f"Emergency stop reset: user={user_id}")
+        
+        return {
+            "success": True,
+            "message": "Emergency stop reset - trading can resume",
+        }
+        
+    except Exception as e:
+        logger.error(f"Emergency reset failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Emergency reset failed: {str(e)}")
+
+
+@router.get(
+    "/safety-status",
+    summary="Get Safety Status",
+    description="Get current safety status including circuit breaker, cooldown, and daily loss",
+)
+async def get_safety_status(
+    wallet_id: Optional[str] = Query(None, description="Specific wallet ID (optional)"),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    """
+    Get safety status for user's trading.
+    
+    Returns:
+    - Emergency stop state
+    - Circuit breaker status
+    - Cooldown status
+    - Daily P&L and loss limit status
+    """
+    from bson import ObjectId
+    from datetime import datetime, timezone
+    
+    try:
+        user_id = str(current_user["_id"]) if current_user else None
+        
+        # Default response for unauthenticated or no status
+        default_status = {
+            "emergency_stop": False,
+            "emergency_stop_at": None,
+            "circuit_breaker_tripped": False,
+            "circuit_breaker_reason": None,
+            "circuit_breaker_until": None,
+            "consecutive_losses": 0,
+            "cooldown_until": None,
+            "cooldown_reason": None,
+            "daily_pnl": 0.0,
+            "daily_loss_limit": 100.0,
+            "daily_loss_remaining": 100.0,
+            "daily_trades": 0,
+            "daily_wins": 0,
+            "daily_losses": 0,
+        }
+        
+        if not user_id:
+            return default_status
+        
+        # Build query
+        query = {"user_id": ObjectId(user_id)}
+        if wallet_id:
+            query["wallet_id"] = ObjectId(wallet_id)
+        
+        # Get first matching status (or aggregate across wallets)
+        status = await db.safety_status.find_one(query)
+        
+        if not status:
+            return default_status
+        
+        # Check daily reset
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_reset_at = status.get("daily_reset_at")
+        
+        if not daily_reset_at or daily_reset_at < today_start:
+            # Reset daily counters
+            await db.safety_status.update_one(
+                {"_id": status["_id"]},
+                {
+                    "$set": {
+                        "daily_pnl": 0.0,
+                        "daily_trades": 0,
+                        "daily_wins": 0,
+                        "daily_losses": 0,
+                        "daily_reset_at": today_start,
+                        "updated_at": now,
+                    }
+                }
+            )
+            status["daily_pnl"] = 0.0
+            status["daily_trades"] = 0
+            status["daily_wins"] = 0
+            status["daily_losses"] = 0
+        
+        # Calculate daily loss remaining
+        daily_pnl = status.get("daily_pnl", 0.0)
+        daily_loss_limit = 100.0  # Default $100 limit
+        current_loss = abs(min(0, daily_pnl))
+        daily_loss_remaining = max(0, daily_loss_limit - current_loss)
+        
+        return {
+            "emergency_stop": status.get("emergency_stop", False),
+            "emergency_stop_at": status.get("emergency_stop_at"),
+            "circuit_breaker_tripped": status.get("circuit_breaker_tripped", False),
+            "circuit_breaker_reason": status.get("circuit_breaker_reason"),
+            "circuit_breaker_until": status.get("circuit_breaker_until"),
+            "consecutive_losses": status.get("consecutive_losses", 0),
+            "cooldown_until": status.get("cooldown_until"),
+            "cooldown_reason": status.get("cooldown_reason"),
+            "daily_pnl": daily_pnl,
+            "daily_loss_limit": daily_loss_limit,
+            "daily_loss_remaining": daily_loss_remaining,
+            "daily_trades": status.get("daily_trades", 0),
+            "daily_wins": status.get("daily_wins", 0),
+            "daily_losses": status.get("daily_losses", 0),
+        }
+        
+    except Exception as e:
+        logger.error(f"Get safety status failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get safety status: {str(e)}")

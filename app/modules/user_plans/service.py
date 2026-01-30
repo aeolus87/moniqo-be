@@ -9,7 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.modules.user_plans.models import UserPlan
 from app.modules.user_plans.schemas import UserPlanCreate, UserPlanUpdate
 from app.modules.plans.models import Plan
-from app.core.exceptions import ResourceNotFoundError, DuplicateResourceError, ValidationError, BadRequestError
+from app.shared.exceptions import ResourceNotFoundError, DuplicateResourceError, ValidationError, BadRequestError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

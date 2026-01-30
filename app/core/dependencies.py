@@ -10,9 +10,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from bson import ObjectId
 from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
 from app.core.security import verify_token
-from app.core.exceptions import (
+from app.shared.exceptions import (
     TokenExpiredError,
     InvalidTokenError,
     InactiveAccountError,
@@ -26,9 +25,23 @@ logger = get_logger(__name__)
 security = HTTPBearer(auto_error=False)
 
 
+async def get_db() -> AsyncIOMotorDatabase:
+    """
+    FastAPI dependency to get database instance.
+    
+    Automatically routes to correct database (real/demo) based on trading mode context.
+    
+    Returns:
+        AsyncIOMotorDatabase: Database instance for current trading mode
+    """
+    # Lazy import to avoid circular import
+    from app.core.database import db_provider
+    return db_provider.get_db()
+
+
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ) -> dict:
     """
     Get current authenticated user from JWT token.
@@ -128,7 +141,7 @@ async def get_current_user(
 
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ) -> Optional[dict]:
     """
     Get current user if authenticated, None otherwise.
@@ -180,7 +193,7 @@ def require_permission(resource: str, action: str):
     """
     async def permission_checker(
         current_user: dict = Depends(get_current_user),
-        db: AsyncIOMotorDatabase = Depends(get_database)
+        db: AsyncIOMotorDatabase = Depends(get_db)
     ) -> dict:
         """
         Check if user has required permission.
@@ -271,7 +284,7 @@ def require_permission(resource: str, action: str):
 
 async def get_current_active_superuser(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ) -> dict:
     """
     Get current user and verify they are a superuser.
@@ -288,7 +301,7 @@ async def get_current_active_superuser(
     """
     # TODO: Implement superuser check in Sprint 19
     # For now, check if user's email matches SUPERADMIN_EMAIL
-    from app.config.settings import settings
+    from app.core.config import settings
     
     superadmin_email = settings.SUPERADMIN_EMAIL if settings else "admin@example.com"
     
@@ -329,4 +342,21 @@ def validate_object_id(id_value: str) -> str:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid ID format: '{id_value}' is not a valid Object ID"
         )
+
+
+# Export dependencies
+__all__ = [
+    "get_db",
+    "get_current_user",
+    "get_current_user_optional",
+    "require_permission",
+    "get_current_active_superuser",
+    "validate_object_id",
+]
+
+
+def get_wallet_factory():
+    """Get wallet factory instance."""
+    from app.infrastructure.exchanges.factory import WalletFactory
+    return WalletFactory()
 

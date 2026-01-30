@@ -181,3 +181,45 @@ def resolve_demo_force_action(
         return "sell", "Signal classification bearish; forced sell."
 
     return "buy", "No actionable signal; defaulting forced action to buy."
+
+
+def resolve_leverage(
+    execution_config: Dict[str, Any],
+    wallet_capabilities: Dict[str, Any],
+    default_leverage: int = 1
+) -> int:
+    """
+    Resolve leverage from config with validation.
+    
+    Args:
+        execution_config: Flow execution config
+        wallet_capabilities: Wallet capabilities (max_leverage, etc.)
+        default_leverage: Default if not specified
+    
+    Returns:
+        Validated leverage (1-max_leverage)
+    
+    Example:
+        leverage = resolve_leverage(
+            execution_config={"leverage": 10},
+            wallet_capabilities={"max_leverage": 20},
+            default_leverage=1
+        )
+        # Returns: 10
+    """
+    leverage = execution_config.get("leverage", default_leverage)
+    
+    # Ensure leverage is an integer
+    try:
+        leverage = int(leverage)
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid leverage value: {leverage}, using default: {default_leverage}")
+        leverage = default_leverage
+    
+    # Get max leverage from wallet capabilities (default 20 for Hyperliquid)
+    max_leverage = wallet_capabilities.get("max_leverage", 20)
+    
+    # Clamp leverage between 1 and max_leverage
+    leverage = max(1, min(leverage, max_leverage))
+    
+    return leverage

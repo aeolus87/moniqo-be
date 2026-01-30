@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from app.config.settings import settings
-from app.core.exceptions import TokenExpiredError, InvalidTokenError
+from app.core.config import settings
+from app.shared.exceptions import TokenExpiredError, InvalidTokenError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

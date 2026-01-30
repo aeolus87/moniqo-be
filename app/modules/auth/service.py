@@ -17,7 +17,7 @@ from app.core.security import (
     create_password_reset_token,
     verify_password_reset_token,
 )
-from app.core.exceptions import (
+from app.shared.exceptions import (
     DuplicateEmailError,
     InvalidCredentialsError,
     UnverifiedEmailError,
@@ -29,7 +29,7 @@ from app.core.exceptions import (
 from app.modules.auth import models as auth_models
 from app.modules.auth.schemas import RegisterRequest, LoginRequest, TokenResponse
 from app.modules.roles import models as role_models
-from app.config.settings import settings
+from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from decimal import Decimal
 import asyncio
 
-from app.integrations.wallets.base import OrderSide, OrderType, TimeInForce
+from app.infrastructure.exchanges.base import OrderSide, OrderType, TimeInForce
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +27,8 @@ async def place_order_with_retry(
     time_in_force: TimeInForce,
     max_retries: int,
     retry_delay_seconds: float,
+    leverage: Optional[int] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Place an order with retries for transient failures.
@@ -42,11 +44,18 @@ async def place_order_with_retry(
         time_in_force: GTC, IOC, FOK, etc.
         max_retries: Maximum retry attempts
         retry_delay_seconds: Delay between retries
+        leverage: Leverage multiplier (for perpetual futures, default: None)
+        **kwargs: Additional wallet-specific parameters
         
     Returns:
         Order result dict with success status, order_id, filled_quantity, etc.
     """
     last_error: Optional[Exception] = None
+
+    # Prepare order kwargs (include leverage if provided)
+    order_kwargs = kwargs.copy()
+    if leverage is not None:
+        order_kwargs["leverage"] = leverage
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -58,6 +67,7 @@ async def place_order_with_retry(
                 price=price,
                 stop_price=stop_price,
                 time_in_force=time_in_force,
+                **order_kwargs
             )
         except Exception as e:
             last_error = e
@@ -95,7 +105,7 @@ async def check_price_staleness(
     Returns:
         Dict with is_stale flag and price_change_pct
     """
-    from app.integrations.market_data.binance_client import BinanceClient
+    from app.infrastructure.market_data.binance_client import BinanceClient
     
     fresh_price = None
     if wallet:
@@ -158,7 +168,7 @@ def create_simulated_order_result(
     Returns:
         Simulated order result dict
     """
-    from app.integrations.wallets.base import OrderStatus
+    from app.infrastructure.exchanges.base import OrderStatus
     
     return {
         "success": True,

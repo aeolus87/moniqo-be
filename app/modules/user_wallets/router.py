@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_user
 from app.modules.user_wallets.schemas import (
     WalletDefinitionResponse,
@@ -61,7 +61,7 @@ router = APIRouter()
 async def list_wallet_definitions(
     is_active: bool = True,
     integration_type: str = None,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -98,7 +98,7 @@ async def list_wallet_definitions(
 )
 async def get_wallet_definition(
     wallet_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """Get single wallet provider details."""
@@ -134,7 +134,7 @@ async def get_wallet_definition(
 )
 async def list_user_wallets(
     is_active: bool = None,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -172,7 +172,7 @@ async def list_user_wallets(
 )
 async def create_user_wallet(
     request: CreateUserWalletRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -188,7 +188,8 @@ async def create_user_wallet(
             wallet_provider_id=request.wallet_provider_id,
             custom_name=request.custom_name,
             credentials=request.credentials,
-            risk_limits=request.risk_limits
+            risk_limits=request.risk_limits,
+            use_testnet=request.use_testnet
         )
         
         logger.info(
@@ -219,7 +220,7 @@ async def create_user_wallet(
 )
 async def get_user_wallet(
     wallet_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """Get single wallet connection details."""
@@ -258,7 +259,7 @@ async def get_user_wallet(
 async def update_user_wallet(
     wallet_id: str,
     request: UpdateUserWalletRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """Update wallet connection settings."""
@@ -273,6 +274,8 @@ async def update_user_wallet(
             update_data["is_active"] = request.is_active
         if request.risk_limits is not None:
             update_data["risk_limits"] = request.risk_limits
+        if request.use_testnet is not None:
+            update_data["use_testnet"] = request.use_testnet
         
         if not update_data:
             raise HTTPException(
@@ -313,7 +316,7 @@ async def update_user_wallet(
 )
 async def delete_user_wallet(
     wallet_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """Delete wallet connection (soft delete)."""
@@ -352,7 +355,7 @@ async def delete_user_wallet(
 )
 async def test_wallet_connection(
     wallet_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -403,7 +406,7 @@ async def test_wallet_connection(
 )
 async def sync_wallet_balance(
     wallet_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -455,7 +458,7 @@ async def sync_wallet_balance(
 async def get_wallet_sync_logs(
     wallet_id: str,
     limit: int = 50,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -500,7 +503,7 @@ async def get_wallet_sync_logs(
 async def add_demo_wallet_balance(
     wallet_id: str,
     request: AddBalanceRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -510,7 +513,7 @@ async def add_demo_wallet_balance(
     to the demo wallet for testing purposes.
     """
     from decimal import Decimal
-    from app.integrations.wallets.factory import get_wallet_factory
+    from app.infrastructure.exchanges.factory import get_wallet_factory
     
     try:
         # Verify wallet ownership

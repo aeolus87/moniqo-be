@@ -7,10 +7,10 @@ API endpoints for user operations.
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_user, require_permission
 from app.core.responses import success_response, error_response, paginated_response
-from app.core.exceptions import UserNotFoundError, ValidationError
+from app.shared.exceptions import UserNotFoundError, ValidationError
 from app.modules.users import service as user_service
 from app.modules.users.schemas import UserUpdate, UserResponse
 from app.utils.pagination import get_pagination_params
@@ -39,7 +39,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 )
 async def get_current_user_info(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get current user information.
@@ -80,7 +80,7 @@ async def get_current_user_info(
 async def update_current_user(
     update_data: UserUpdate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update current user information.
@@ -129,7 +129,7 @@ async def update_current_user(
 )
 async def delete_current_user(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Delete current user account.
@@ -180,7 +180,7 @@ async def list_users(
     limit: int = Query(10, description="Number of items per page"),
     offset: int = Query(0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List all users (paginated).
@@ -233,7 +233,7 @@ async def list_users(
 async def get_user(
     user_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get user by ID.
@@ -285,7 +285,7 @@ async def update_user(
     user_id: str,
     update_data: UserUpdate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update user by ID.
@@ -345,7 +345,7 @@ async def update_user(
 async def delete_user(
     user_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Delete user by ID.

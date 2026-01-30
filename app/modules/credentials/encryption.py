@@ -5,7 +5,7 @@ Handles encryption/decryption of sensitive credential data using Fernet.
 """
 
 from cryptography.fernet import Fernet
-from app.config.settings import get_settings
+from app.core.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

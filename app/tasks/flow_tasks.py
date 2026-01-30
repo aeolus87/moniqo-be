@@ -14,6 +14,7 @@ from typing import List, Dict, Any
 from celery import shared_task, Task
 from croniter import croniter
 
+from app.core.context import TradingMode
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -49,42 +50,61 @@ def _should_run_now(cron_expression: str) -> bool:
 
 
 async def _get_scheduled_flows():
-    """Get all active flows with schedule trigger type."""
-    from app.config.database import get_database
+    """Get all active flows with schedule trigger type from both databases."""
+    from app.core.database import db_provider
+    from app.core.context import TradingMode
     from app.modules.flows.models import FlowStatus, FlowTrigger
     
-    db = get_database()
-    
-    cursor = db["flows"].find({
-        "status": FlowStatus.ACTIVE.value,
-        "trigger": FlowTrigger.SCHEDULE.value,
-        "schedule": {"$ne": None, "$ne": ""}
-    })
-    
     flows = []
-    async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        flows.append(doc)
+    
+    # Check both databases
+    for mode in [TradingMode.DEMO, TradingMode.REAL]:
+        db = db_provider.get_db_for_mode(mode)
+        
+        cursor = db["flows"].find({
+            "status": FlowStatus.ACTIVE.value,
+            "trigger": FlowTrigger.SCHEDULE.value,
+            "schedule": {"$ne": None, "$ne": ""}
+        })
+        
+        async for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            doc["_trading_mode"] = mode.value  # Store mode for later use
+            flows.append(doc)
     
     return flows
 
 
-async def _trigger_flow(flow_id: str, model_provider: str = "groq"):
+async def _trigger_flow(flow_id: str, model_provider: str = "groq", trading_mode: TradingMode = None):
     """Trigger a single flow execution."""
-    from app.config.database import get_database
+    from app.core.database import db_provider
+    from app.core.context import TradingMode
     from app.modules.flows import service as flow_service
     
-    db = get_database()
+    # If mode not provided, try to find flow in both databases
+    if trading_mode is None:
+        # Try demo first, then real
+        for mode in [TradingMode.DEMO, TradingMode.REAL]:
+            db = db_provider.get_db_for_mode(mode)
+            flow = await flow_service.get_flow_by_id(db, flow_id)
+            if flow:
+                trading_mode = mode
+                break
+        
+        if trading_mode is None:
+            logger.error(f"Flow not found in any database: {flow_id}")
+            return None
+    else:
+        db = db_provider.get_db_for_mode(trading_mode)
+        flow = await flow_service.get_flow_by_id(db, flow_id)
+        if not flow:
+            logger.error(f"Flow not found: {flow_id}")
+            return None
     
-    flow = await flow_service.get_flow_by_id(db, flow_id)
-    if not flow:
-        logger.error(f"Flow not found: {flow_id}")
-        return None
-    
-    logger.info(f"Triggering scheduled flow: {flow.name} ({flow_id})")
+    logger.info(f"Triggering scheduled flow: {flow.name} ({flow_id}) in {trading_mode.value} mode")
     
     try:
-        execution = await flow_service.execute_flow(db, flow, model_provider)
+        execution = await flow_service.execute_flow(flow, model_provider)
         logger.info(f"Scheduled flow execution completed: {execution.id}")
         return execution
     except Exception as e:
@@ -108,13 +128,15 @@ def trigger_scheduled_flows_task():
         for flow_doc in flows:
             flow_id = flow_doc["_id"]
             schedule = flow_doc.get("schedule")
+            trading_mode_str = flow_doc.get("_trading_mode", "demo")
+            trading_mode = TradingMode.DEMO if trading_mode_str == "demo" else TradingMode.REAL
             
             if not schedule:
                 continue
             
             if _should_run_now(schedule):
                 logger.info(f"Triggering flow {flow_doc.get('name')} - schedule: {schedule}")
-                await _trigger_flow(flow_id)
+                await _trigger_flow(flow_id, trading_mode=trading_mode)
                 triggered_count += 1
         
         logger.info(f"Scheduled flows check complete. Triggered: {triggered_count}")
@@ -142,17 +164,24 @@ def execute_flow_task(flow_id: str, model_provider: str = "groq", model_name: st
     logger.info(f"Executing flow task: {flow_id}")
     
     async def run():
-        from app.config.database import get_database
+        from app.core.database import db_provider
+        from app.core.context import TradingMode
         from app.modules.flows import service as flow_service
         
-        db = get_database()
-        flow = await flow_service.get_flow_by_id(db, flow_id)
+        # Try to find flow in both databases
+        flow = None
+        db = None
+        for mode in [TradingMode.DEMO, TradingMode.REAL]:
+            db = db_provider.get_db_for_mode(mode)
+            flow = await flow_service.get_flow_by_id(db, flow_id)
+            if flow:
+                break
         
         if not flow:
             logger.error(f"Flow not found: {flow_id}")
             return None
         
-        execution = await flow_service.execute_flow(db, flow, model_provider, model_name)
+        execution = await flow_service.execute_flow(flow, model_provider, model_name)
         return str(execution.id) if execution else None
     
     loop = asyncio.new_event_loop()
@@ -172,37 +201,43 @@ def heartbeat_running_executions_task(self: Task) -> Dict[str, Any]:
     Updates lock expiration for active executions.
     """
     async def heartbeat_all():
-        from app.config.database import get_database
+        from app.core.database import db_provider
+        from app.core.context import TradingMode
         from app.modules.flows.models import ExecutionStatus
         from app.modules.flows.service import heartbeat_execution_lock
         
-        db = get_database()
-        
-        # Find all running executions
-        running_executions = await db["executions"].find({
-            "status": ExecutionStatus.RUNNING.value,
-            "deleted_at": None
-        }).to_list(length=None)
-        
         heartbeat_count = 0
         failed_count = 0
+        total_running = 0
         
-        for exec_doc in running_executions:
-            flow_id = exec_doc.get("flow_id")
-            execution_id = str(exec_doc.get("_id"))
+        # Check both databases
+        for mode in [TradingMode.DEMO, TradingMode.REAL]:
+            db = db_provider.get_db_for_mode(mode)
             
-            if flow_id:
-                success = await heartbeat_execution_lock(db, str(flow_id), execution_id)
-                if success:
-                    heartbeat_count += 1
-                else:
-                    failed_count += 1
+            # Find all running executions
+            running_executions = await db["executions"].find({
+                "status": ExecutionStatus.RUNNING.value,
+                "deleted_at": None
+            }).to_list(length=None)
+            
+            total_running += len(running_executions)
+            
+            for exec_doc in running_executions:
+                flow_id = exec_doc.get("flow_id")
+                execution_id = str(exec_doc.get("_id"))
+                
+                if flow_id:
+                    success = await heartbeat_execution_lock(db, str(flow_id), execution_id)
+                    if success:
+                        heartbeat_count += 1
+                    else:
+                        failed_count += 1
         
         return {
             "success": True,
             "heartbeat_count": heartbeat_count,
             "failed_count": failed_count,
-            "total_running": len(running_executions)
+            "total_running": total_running
         }
     
     # Run async code

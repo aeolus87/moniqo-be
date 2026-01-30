@@ -7,7 +7,7 @@ Business logic for user operations.
 from typing import List, Optional
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.core.exceptions import UserNotFoundError, ValidationError
+from app.shared.exceptions import UserNotFoundError, ValidationError
 from app.modules.users import models as user_models
 from app.modules.users.schemas import UserUpdate, UserResponse, UserListResponse
 from app.utils.cache import CacheManager

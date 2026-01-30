@@ -1,0 +1,236 @@
+"""
+Application settings using Pydantic Settings.
+
+Loads configuration from environment variables with validation.
+"""
+
+from typing import List
+from urllib.parse import urlparse
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    """
+    Application settings loaded from environment variables.
+    
+    All settings are loaded from .env file or environment variables.
+    Uses Pydantic for validation and type checking.
+    """
+    
+    # App Configuration
+    APP_NAME: str = Field(default="AI Agent Trading Platform")
+    APP_VERSION: str = Field(default="1.0.0")
+    ENVIRONMENT: str = Field(default="development")
+    DEBUG: bool = Field(default=True)
+    
+    # Server
+    HOST: str = Field(default="0.0.0.0")
+    PORT: int = Field(default=8000)
+    
+    # Database
+    MONGODB_URL: str = Field(..., description="MongoDB connection string")
+    MONGODB_DB_NAME: str = Field(..., description="MongoDB database name")
+    MONGODB_DB_NAME_REAL: str | None = Field(default=None, description="MongoDB database name for real trading (defaults to {MONGODB_DB_NAME}_real)")
+    MONGODB_DB_NAME_DEMO: str | None = Field(default=None, description="MongoDB database name for demo trading (defaults to {MONGODB_DB_NAME}_demo)")
+    
+    @property
+    def mongodb_db_name_real(self) -> str:
+        """Get real trading database name."""
+        return self.MONGODB_DB_NAME_REAL or f"{self.MONGODB_DB_NAME}_real"
+    
+    @property
+    def mongodb_db_name_demo(self) -> str:
+        """Get demo trading database name."""
+        return self.MONGODB_DB_NAME_DEMO or f"{self.MONGODB_DB_NAME}_demo"
+    
+    # Redis
+    REDIS_URL: str = Field(..., description="Redis connection string")
+    REDIS_TTL_SECONDS: int = Field(default=86400)
+    
+    # JWT Authentication
+    JWT_SECRET_KEY: str = Field(..., description="Secret key for JWT tokens")
+    JWT_ALGORITHM: str = Field(default="HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7)
+    
+    # Email Auto-Verification
+    AUTO_VERIFY_EMAIL: bool = Field(default=False)
+    
+    # Superadmin
+    SUPERADMIN_EMAIL: str = Field(..., description="Superadmin email")
+    SUPERADMIN_PASSWORD: str = Field(..., description="Superadmin password")
+    SUPERADMIN_FIRST_NAME: str = Field(default="Super")
+    SUPERADMIN_LAST_NAME: str = Field(default="Admin")
+    
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = Field(..., description="AWS access key")
+    AWS_SECRET_ACCESS_KEY: str = Field(..., description="AWS secret key")
+    AWS_REGION: str = Field(default="us-east-1")
+    AWS_S3_BUCKET_NAME: str = Field(..., description="S3 bucket name")
+    
+    # File Upload Limits
+    MAX_AVATAR_SIZE_MB: int = Field(default=5)
+    ALLOWED_AVATAR_TYPES: str = Field(default="image/jpeg,image/png,image/gif")
+    
+    # Resend Email
+    RESEND_API_KEY: str = Field(..., description="Resend API key")
+    FROM_EMAIL: str = Field(..., description="From email address")
+    
+    # Rate Limiting
+    RATE_LIMIT_PER_MINUTE: int = Field(default=100)
+    ADMIN_RATE_LIMIT_ENABLED: bool = Field(default=False)
+    
+    # Pagination
+    DEFAULT_PAGE_SIZE: int = Field(default=10)
+    MAX_PAGE_SIZE: int = Field(default=5000)
+    
+    # Logging
+    LOG_LEVEL: str = Field(default="INFO")
+    LOG_FILE_PATH: str = Field(default="logs/app.log")
+    
+    # CORS
+    CORS_ORIGINS: str = Field(default="http://localhost:3000,http://localhost:5173")
+    
+    # Credential Encryption
+    ENCRYPTION_KEY: str = Field(..., description="Fernet encryption key for credentials (base64 encoded)")
+    
+    # AI Model API Keys
+    GROQ_API_KEY: str = Field(default="", description="Groq API key for LLM")
+    OPENROUTER_API_KEY: str = Field(default="", description="OpenRouter API key")
+    GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key")
+    
+    # Default AI Model Configuration  
+    AI_DEFAULT_PROVIDER: str = Field(default="groq", description="Default AI provider (groq, gemini, openrouter)")
+    AI_DEFAULT_MODEL: str = Field(default="llama-3.3-70b-versatile", description="Default AI model name")
+    
+    # Celery (for background tasks and scheduled flows)
+    CELERY_BROKER_URL: str = Field(default="", description="Celery broker URL (defaults to REDIS_URL)")
+    CELERY_RESULT_BACKEND: str = Field(default="", description="Celery result backend (defaults to REDIS_URL)")
+
+    # Position monitoring (Socket.IO push)
+    POSITION_MONITOR_ENABLED: bool = Field(default=True)
+    POSITION_MONITOR_INTERVAL_SECONDS: int = Field(default=5)
+    
+    # Sentiment API Keys (optional, for signal aggregation)
+    TWITTER_BEARER_TOKEN: str = Field(default="", description="X/Twitter API Bearer Token")
+    REDDIT_CLIENT_ID: str = Field(default="", description="Reddit API Client ID")
+    REDDIT_CLIENT_SECRET: str = Field(default="", description="Reddit API Client Secret")
+    
+    # Hyperliquid Configuration (Optional - defaults provided)
+    HYPERLIQUID_API_URL: str = Field(default="https://api.hyperliquid.xyz", description="Hyperliquid API base URL")
+    HYPERLIQUID_MAX_LEVERAGE: int = Field(default=20, description="Maximum leverage allowed for Hyperliquid (1-20)")
+    HYPERLIQUID_DEFAULT_LEVERAGE: int = Field(default=1, description="Default leverage for Hyperliquid trades")
+    
+    @property
+    def celery_broker(self) -> str:
+        """Get Celery broker URL (fallback to Redis)."""
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+    
+    @property
+    def celery_backend(self) -> str:
+        """Get Celery result backend URL (fallback to Redis)."""
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
+    
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Get CORS origins as a list."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+    
+    @property
+    def allowed_avatar_types_list(self) -> List[str]:
+        """Get allowed avatar types as a list."""
+        return [mime_type.strip() for mime_type in self.ALLOWED_AVATAR_TYPES.split(",")]
+    
+    @field_validator("REDIS_URL")
+    @classmethod
+    def validate_redis_url(cls, v: str) -> str:
+        """
+        Validate Redis URL has required components.
+        
+        Args:
+            v: Redis connection URL.
+        
+        Returns:
+            str: Original Redis URL if valid.
+        
+        Raises:
+            ValueError: If scheme is invalid or port is missing/non-numeric.
+        """
+        parsed = urlparse(v)
+
+        if parsed.scheme not in {"redis", "rediss"}:
+            raise ValueError("REDIS_URL must use redis:// or rediss:// scheme")
+
+        port = parsed.port
+
+        if port is None:
+            raise ValueError(
+                "REDIS_URL must include a numeric port, e.g. redis://:password@host:6379/0"
+            )
+
+        if parsed.path and parsed.path != "/" and not parsed.path.lstrip("/").isdigit():
+            raise ValueError(
+                "REDIS_URL database index must be numeric, e.g. redis://:password@host:6379/0"
+            )
+
+        return v
+    
+    @field_validator("MAX_AVATAR_SIZE_MB")
+    @classmethod
+    def validate_max_avatar_size(cls, v: int) -> int:
+        """Validate max avatar size is positive."""
+        if v <= 0:
+            raise ValueError("MAX_AVATAR_SIZE_MB must be positive")
+        return v
+    
+    @field_validator("RATE_LIMIT_PER_MINUTE")
+    @classmethod
+    def validate_rate_limit(cls, v: int) -> int:
+        """Validate rate limit is positive."""
+        if v <= 0:
+            raise ValueError("RATE_LIMIT_PER_MINUTE must be positive")
+        return v
+    
+    @field_validator("ACCESS_TOKEN_EXPIRE_MINUTES")
+    @classmethod
+    def validate_access_token_expire(cls, v: int) -> int:
+        """Validate access token expiration is positive."""
+        if v <= 0:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be positive")
+        return v
+    
+    @field_validator("REFRESH_TOKEN_EXPIRE_DAYS")
+    @classmethod
+    def validate_refresh_token_expire(cls, v: int) -> int:
+        """Validate refresh token expiration is positive."""
+        if v <= 0:
+            raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS must be positive")
+        return v
+    
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": True,
+    }
+
+
+# Global settings instance
+def get_settings() -> Settings:
+    """Get settings instance (lazy loading)."""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+_settings: Settings | None = None
+
+# Try to initialize settings on import
+try:
+    settings = Settings()
+except Exception as e:
+    # If .env file doesn't exist or required fields are missing,
+    # settings will be None and should be initialized later
+    print(f"Warning: Could not load settings: {str(e)}")
+    print("Please create .env file with required configuration")
+    settings = None  # type: ignore

@@ -7,7 +7,7 @@ Business logic for wallet definition operations.
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.core.exceptions import ValidationError, NotFoundError
+from app.shared.exceptions import ValidationError, NotFoundError
 from app.modules.wallets import models as wallet_models
 from app.modules.wallets.schemas import (
     CreateWalletDefinitionRequest,

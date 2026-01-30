@@ -47,6 +47,8 @@ if settings is None:
 # Use the same database as configured (not a separate test database)
 # We'll clean up test data after each test instead
 TEST_DB_NAME = settings.MONGODB_DB_NAME if settings else "ai_trading_platform"
+TEST_DB_NAME_REAL = settings.mongodb_db_name_real if settings else f"{TEST_DB_NAME}_real"
+TEST_DB_NAME_DEMO = settings.mongodb_db_name_demo if settings else f"{TEST_DB_NAME}_demo"
 
 
 @pytest.fixture(scope="session")
@@ -101,10 +103,59 @@ async def test_db() -> AsyncGenerator[AsyncIOMotorDatabase, None]:
         await db["wallets"].delete_many({})
         await db["credentials"].delete_many({})
         await db["user_wallets"].delete_many({})
+        await db["orders"].delete_many({})
+        await db["positions"].delete_many({})
+        await db["executions"].delete_many({})
+        await db["flows"].delete_many({})
     except Exception as e:
         print(f"Warning: Could not clean up test data: {e}")
     
+    # Also clean up demo and real test databases if they exist
+    try:
+        from app.core.database import db_provider
+        from app.core.context import TradingMode
+        
+        if db_provider._initialized:
+            # Clean demo database
+            db_demo = db_provider.get_db_for_mode(TradingMode.DEMO)
+            await db_demo["orders"].delete_many({})
+            await db_demo["positions"].delete_many({})
+            await db_demo["executions"].delete_many({})
+            await db_demo["flows"].delete_many({})
+            await db_demo["user_wallets"].delete_many({})
+            # Note: wallets collection is shared, so we don't delete it here
+            
+            # Clean real database
+            db_real = db_provider.get_db_for_mode(TradingMode.REAL)
+            await db_real["orders"].delete_many({})
+            await db_real["positions"].delete_many({})
+            await db_real["executions"].delete_many({})
+            await db_real["flows"].delete_many({})
+            await db_real["user_wallets"].delete_many({})
+    except Exception as e:
+        print(f"Warning: Could not clean up demo/real test databases: {e}")
+    
     client.close()
+
+
+@pytest.fixture(scope="function")
+async def db_provider_initialized() -> AsyncGenerator[None, None]:
+    """
+    Initialize DatabaseProvider with test databases.
+    
+    This fixture ensures DatabaseProvider is initialized before tests run.
+    Uses test database names from settings or defaults.
+    """
+    from app.core.database import db_provider
+    
+    # Initialize DatabaseProvider if not already initialized
+    if not db_provider._initialized:
+        await db_provider.initialize()
+    
+    yield
+    
+    # Note: We don't close DatabaseProvider here as it's a singleton
+    # Cleanup is handled by individual test fixtures
 
 
 @pytest.fixture(scope="function")
@@ -118,15 +169,10 @@ async def test_client(test_db: AsyncIOMotorDatabase) -> AsyncGenerator[AsyncClie
     Yields:
         AsyncClient: HTTP client for testing API endpoints
     """
-    # Override get_database dependency to use test database
-    from app.config import database
-    database._database = test_db
-    
+    # Note: DatabaseProvider is used for mode-specific routing
+    # Test database is used for shared collections (users, auth, etc.)
     async with AsyncClient(app=app, base_url="http://test") as client:
         yield client
-    
-    # Reset database after test
-    database._database = None
 
 
 @pytest.fixture

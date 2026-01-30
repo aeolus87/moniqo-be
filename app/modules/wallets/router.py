@@ -8,10 +8,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
+from app.core.context import TradingMode
 from app.core.dependencies import get_current_user, require_permission
 from app.core.responses import success_response, error_response, paginated_response
-from app.core.exceptions import ValidationError, NotFoundError
+from app.shared.exceptions import ValidationError, NotFoundError
 from app.modules.wallets import service as wallet_service
 from app.modules.wallets.schemas import (
     CreateWalletDefinitionRequest,
@@ -46,7 +47,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_wallet_definition(
     wallet_data: CreateWalletDefinitionRequest,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db_for_mode(TradingMode.DEMO))
 ):
     """
     Create a new wallet definition.
@@ -103,7 +104,7 @@ async def list_wallet_definitions(
     is_active: Optional[str] = Query(None, description="Filter by active status (true/false)"),
     limit: int = Query(100, ge=1, le=5000, description="Number of items per page"),
     offset: int = Query(0, ge=0, description="Number of items to skip"),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db_for_mode(TradingMode.DEMO))
 ):
     """
     List all wallet definitions.
@@ -163,7 +164,7 @@ async def list_wallet_definitions(
 )
 async def get_wallet_definition(
     slug: str,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db_for_mode(TradingMode.DEMO))
 ):
     """
     Get wallet definition by slug.
@@ -214,7 +215,7 @@ async def update_wallet_definition(
     slug: str,
     update_data: UpdateWalletDefinitionRequest,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db_for_mode(TradingMode.DEMO))
 ):
     """
     Update wallet definition.
@@ -274,7 +275,7 @@ async def update_wallet_definition(
 async def delete_wallet_definition(
     slug: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db_for_mode(TradingMode.DEMO))
 ):
     """
     Delete wallet definition (soft delete - sets is_active=False).

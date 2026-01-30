@@ -7,12 +7,11 @@ REST API routes for subscription management.
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config import get_database
 from app.core.responses import success_response, error_response
 from app.core.dependencies import get_current_user, require_permission
 from app.modules.user_plans.schemas import UserPlanCreate, UserPlanUpdate, UserPlanResponse
 from app.modules.user_plans import service as user_plans_service
-from app.core.exceptions import (
+from app.shared.exceptions import (
     DuplicateResourceError,
     ResourceNotFoundError,
     ValidationError,
@@ -46,7 +45,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_subscription(
     subscription_data: UserPlanCreate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create a new subscription for the current user.
@@ -98,7 +97,7 @@ async def create_subscription(
 )
 async def get_current_subscription(
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get current user's active subscription.
@@ -143,7 +142,7 @@ async def list_user_subscriptions(
     limit: int = Query(10, description="Number of items per page"),
     offset: int = Query(0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List current user's subscriptions with pagination.
@@ -186,7 +185,7 @@ async def list_user_subscriptions(
 async def get_subscription(
     subscription_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get subscription by ID (must belong to current user).
@@ -232,7 +231,7 @@ async def update_subscription(
     subscription_id: str,
     subscription_data: UserPlanUpdate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update subscription (must belong to current user).
@@ -278,7 +277,7 @@ async def update_subscription(
 async def cancel_subscription(
     subscription_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Cancel subscription (must belong to current user).
@@ -331,7 +330,7 @@ async def cancel_subscription(
 async def renew_subscription(
     subscription_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Renew subscription (extend end_date, must belong to current user).

@@ -19,7 +19,7 @@ import os
 import base64
 from typing import Dict, Optional
 from cryptography.fernet import Fernet, InvalidToken
-from app.config.settings import get_settings
+from app.core.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -5,7 +5,7 @@ Provides helper functions for consistent pagination across all list endpoints.
 """
 
 from typing import Tuple, List, Any, Dict
-from app.config.settings import settings
+from app.core.config import settings
 
 
 def get_pagination_params(

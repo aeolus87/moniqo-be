@@ -11,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
 
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -43,7 +43,7 @@ def _serialize_conversation(doc: dict) -> dict:
 @router.get("/{execution_id}")
 async def get_conversation(
     execution_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get conversation by execution id"""
     # Try string first, then ObjectId (for backward compatibility)
@@ -65,7 +65,7 @@ async def stream_conversation(websocket: WebSocket, execution_id: str):
     logger.info(f"[Conversations WS] Client connected for execution: {execution_id}")
 
     try:
-        db = get_database()
+        db = db_provider.get_db()
         # Try string first, then ObjectId (for backward compatibility)
         doc = await db["ai_conversations"].find_one({"execution_id": execution_id})
         if not doc:
@@ -100,7 +100,7 @@ async def stream_conversation(websocket: WebSocket, execution_id: str):
 @router.get("/{conversation_id}/voting")
 async def get_voting_results(
     conversation_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get voting results for a conversation"""
     doc = await db["ai_conversations"].find_one({"_id": ObjectId(conversation_id)})
@@ -120,7 +120,7 @@ async def add_message(
     content: dict,
     message_type: str = "analysis",
     vote: Optional[dict] = None,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Add a message to a conversation"""
     message = {

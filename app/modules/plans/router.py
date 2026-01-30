@@ -7,12 +7,11 @@ REST API routes for subscription plan management.
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config import get_database
 from app.core.responses import success_response, error_response
 from app.core.dependencies import get_current_user, require_permission
 from app.modules.plans.schemas import PlanCreate, PlanUpdate, PlanResponse
 from app.modules.plans import service as plans_service
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.utils.logger import get_logger
 from app.utils.pagination import get_pagination_params, create_paginated_response
 
@@ -41,7 +40,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_plan(
     plan_data: PlanCreate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create a new plan.
@@ -82,7 +81,7 @@ async def list_plans(
     limit: int = Query(10, description="Number of items per page"),
     offset: int = Query(0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List all plans with pagination.
@@ -120,7 +119,7 @@ async def list_plans(
 async def get_plan(
     plan_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get plan by ID.
@@ -162,7 +161,7 @@ async def update_plan(
     plan_id: str,
     plan_data: PlanUpdate,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update plan.
@@ -211,7 +210,7 @@ async def update_plan(
 async def delete_plan(
     plan_id: str,
     current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Soft delete plan.

@@ -7,10 +7,10 @@ API endpoints for role operations.
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.dependencies import get_current_active_superuser
 from app.core.responses import success_response, error_response, paginated_response
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.modules.roles import service as role_service
 from app.modules.roles.schemas import RoleCreate, RoleUpdate, RoleResponse
 from app.utils.pagination import get_pagination_params
@@ -40,7 +40,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 async def create_role(
     role_data: RoleCreate,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Create a new role.
@@ -92,7 +92,7 @@ async def list_roles(
     limit: int = Query(10, description="Number of items per page"),
     offset: int = Query(0, description="Number of items to skip"),
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     List all roles (paginated).
@@ -144,7 +144,7 @@ async def list_roles(
 async def get_role(
     role_id: str,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Get role by ID.
@@ -195,7 +195,7 @@ async def update_role(
     role_id: str,
     role_data: RoleUpdate,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Update role by ID.
@@ -246,7 +246,7 @@ async def update_role(
 async def delete_role(
     role_id: str,
     current_user: dict = Depends(get_current_active_superuser),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Delete role by ID (soft delete).

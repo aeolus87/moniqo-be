@@ -8,7 +8,7 @@ from typing import List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.modules.plans.models import Plan
 from app.modules.plans.schemas import PlanCreate, PlanUpdate
-from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
+from app.shared.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -134,7 +134,7 @@ async def schedule_auto_loop(
                 logger.info(f"Flow {flow.id} is not active (status: {refreshed.status}), stopping auto-loop")
                 return
             
-            await execute_flow(db, refreshed, model_provider, model_name)
+            await execute_flow(refreshed, model_provider, model_name)
         except Exception as e:
             logger.error(f"Auto-loop execution failed for flow {flow.id}: {e}")
             
@@ -149,10 +149,14 @@ async def schedule_auto_loop(
     try:
         from celery import current_task
         if current_task and current_task.request is not None:
-            from app.tasks.flow_tasks import execute_flow_task
+            from app.infrastructure.tasks.flow_tasks import execute_flow_task
+            from app.modules.flows.service import _determine_flow_mode
+
+            # Determine trading mode from flow
+            mode = await _determine_flow_mode(flow)
 
             execute_flow_task.apply_async(
-                args=[str(flow.id), model_provider, model_name],
+                args=[str(flow.id), model_provider, model_name, mode.value],
                 countdown=delay_seconds,
             )
             return

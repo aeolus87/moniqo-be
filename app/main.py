@@ -22,34 +22,53 @@ from fastapi.openapi.utils import get_openapi
 from contextlib import asynccontextmanager
 import asyncio
 import socketio
-from app.config import settings
-from app.config.database import connect_to_mongodb, close_mongodb_connection, get_database
+from app.core.config import settings
+from app.core.database import db_provider
 from app.utils.cache import get_redis_client, close_redis_client
 from app.utils.logger import get_logger
-from app.services.position_tracker import get_position_tracker
-from app.services.market_data_service import MarketDataService, set_market_data_service, get_market_data_service
-from app.integrations.market_data.binance_ws_client import BinanceWebSocketClient
+from app.infrastructure.tasks.position_tracker import get_position_tracker
+from app.infrastructure.market_data.market_data_service import MarketDataService, set_market_data_service, get_market_data_service
+from app.infrastructure.market_data.binance_ws_client import BinanceWebSocketClient
 
 logger = get_logger(__name__)
 
 
 async def _position_monitor_loop() -> None:
-    """Continuously monitor positions and emit Socket.IO updates."""
+    """
+    Continuously monitor positions and emit Socket.IO updates.
+    
+    Monitors positions in both demo and real databases independently.
+    """
+    from app.core.context import set_trading_mode, TradingMode
+    
     interval = max(1, int(getattr(settings, "POSITION_MONITOR_INTERVAL_SECONDS", 5)))
     while True:
         try:
-            db = get_database()
-
-            # Only monitor if there are actually open positions
-            open_positions_count = await db["positions"].count_documents({
+            # Monitor demo positions
+            db_demo = db_provider.get_db_for_mode(TradingMode.DEMO)
+            demo_count = await db_demo["positions"].count_documents({
                 "status": "open",
                 "deleted_at": None
             })
-
-            if open_positions_count > 0:
-                tracker = await get_position_tracker(db)
-                await tracker.monitor_all_positions()
-            else:
+            
+            if demo_count > 0:
+                set_trading_mode(TradingMode.DEMO)
+                tracker_demo = await get_position_tracker()
+                await tracker_demo.monitor_all_positions()
+            
+            # Monitor real positions
+            db_real = db_provider.get_db_for_mode(TradingMode.REAL)
+            real_count = await db_real["positions"].count_documents({
+                "status": "open",
+                "deleted_at": None
+            })
+            
+            if real_count > 0:
+                set_trading_mode(TradingMode.REAL)
+                tracker_real = await get_position_tracker()
+                await tracker_real.monitor_all_positions()
+            
+            if demo_count == 0 and real_count == 0:
                 # Log once per minute instead of every 5 seconds when no positions
                 logger.debug("No open positions to monitor")
         except Exception as e:
@@ -81,9 +100,9 @@ async def lifespan(app: FastAPI):
     
     position_task: asyncio.Task | None = None
     try:
-        # Connect to MongoDB
-        await connect_to_mongodb()
-        
+        # Initialize DatabaseProvider
+        await db_provider.initialize()
+    
         # Connect to Redis
         await get_redis_client()
 
@@ -91,25 +110,41 @@ async def lifespan(app: FastAPI):
             position_task = asyncio.create_task(_position_monitor_loop())
             app.state.position_monitor_task = position_task
         
-        # Recover stuck executions on startup
+        # Recover stuck executions on startup (check both databases)
+        # Handle each database separately so one failure doesn't prevent checking the other
+        from app.modules.flows.service import recover_stuck_executions
+        from app.core.context import TradingMode
+        
+        demo_stats = {"total_recovered": 0, "recovered_expired": 0, "recovered_orphaned": 0}
+        real_stats = {"total_recovered": 0, "recovered_expired": 0, "recovered_orphaned": 0}
+        
+        # Recover from demo database (continue even if it fails)
         try:
-            from app.modules.flows.service import recover_stuck_executions
-            db = get_database()
-            recovery_stats = await recover_stuck_executions(db)
-            if recovery_stats["total_recovered"] > 0:
-                logger.info(
-                    f"Recovered {recovery_stats['total_recovered']} stuck executions on startup: "
-                    f"{recovery_stats['recovered_expired']} expired, {recovery_stats['recovered_orphaned']} orphaned"
-                )
+            db_demo = db_provider.get_db_for_mode(TradingMode.DEMO)
+            demo_stats = await recover_stuck_executions(db_demo)
         except Exception as e:
-            logger.error(f"Failed to recover stuck executions on startup: {e}")
+            logger.debug(f"Could not recover stuck executions from demo database (may be permission issue): {e}")
+        
+        # Recover from real database (continue even if it fails)
+        try:
+            db_real = db_provider.get_db_for_mode(TradingMode.REAL)
+            real_stats = await recover_stuck_executions(db_real)
+        except Exception as e:
+            logger.debug(f"Could not recover stuck executions from real database (may be permission issue): {e}")
+        
+        total_recovered = demo_stats["total_recovered"] + real_stats["total_recovered"]
+        if total_recovered > 0:
+            logger.info(
+                f"Recovered {total_recovered} stuck executions on startup: "
+                f"demo={demo_stats['total_recovered']} (expired={demo_stats['recovered_expired']}, orphaned={demo_stats['recovered_orphaned']}), "
+                f"real={real_stats['total_recovered']} (expired={real_stats['recovered_expired']}, orphaned={real_stats['recovered_orphaned']})"
+            )
         
         # Initialize market data service with Binance WebSocket
         try:
-            db = get_database()
             market_provider = BinanceWebSocketClient(use_futures=True)
             market_service = MarketDataService(market_provider, sio)
-            await market_service.start(db=db)  # Pass DB for real-time position updates
+            await market_service.start()  # Uses DatabaseProvider internally
             set_market_data_service(market_service)
             app.state.market_data_service = market_service
             logger.info("Market data service started")
@@ -140,8 +175,8 @@ async def lifespan(app: FastAPI):
             await market_service.stop()
             logger.info("Market data service stopped")
 
-        # Close MongoDB connection
-        await close_mongodb_connection()
+        # Close DatabaseProvider connections
+        await db_provider.close()
         
         # Close Redis connection
         await close_redis_client()
@@ -276,6 +311,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add Trading Mode Middleware (after CORS, before routers)
+from app.core.middleware import TradingModeMiddleware
+app.add_middleware(TradingModeMiddleware)
 
 # Include routers
 from app.modules.auth.router import router as auth_router

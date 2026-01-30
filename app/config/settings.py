@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # Database
     MONGODB_URL: str = Field(..., description="MongoDB connection string")
     MONGODB_DB_NAME: str = Field(..., description="MongoDB database name")
+    MONGODB_DB_NAME_REAL: str | None = Field(default=None, description="MongoDB database name for real trading (defaults to {MONGODB_DB_NAME}_real)")
+    MONGODB_DB_NAME_DEMO: str | None = Field(default=None, description="MongoDB database name for demo trading (defaults to {MONGODB_DB_NAME}_demo)")
+    
+    @property
+    def mongodb_db_name_real(self) -> str:
+        """Get real trading database name."""
+        return self.MONGODB_DB_NAME_REAL or f"{self.MONGODB_DB_NAME}_real"
+    
+    @property
+    def mongodb_db_name_demo(self) -> str:
+        """Get demo trading database name."""
+        return self.MONGODB_DB_NAME_DEMO or f"{self.MONGODB_DB_NAME}_demo"
     
     # Redis
     REDIS_URL: str = Field(..., description="Redis connection string")
@@ -104,6 +116,11 @@ class Settings(BaseSettings):
     TWITTER_BEARER_TOKEN: str = Field(default="", description="X/Twitter API Bearer Token")
     REDDIT_CLIENT_ID: str = Field(default="", description="Reddit API Client ID")
     REDDIT_CLIENT_SECRET: str = Field(default="", description="Reddit API Client Secret")
+    
+    # Hyperliquid Configuration (Optional - defaults provided)
+    HYPERLIQUID_API_URL: str = Field(default="https://api.hyperliquid.xyz", description="Hyperliquid API base URL")
+    HYPERLIQUID_MAX_LEVERAGE: int = Field(default=20, description="Maximum leverage allowed for Hyperliquid (1-20)")
+    HYPERLIQUID_DEFAULT_LEVERAGE: int = Field(default=1, description="Default leverage for Hyperliquid trades")
     
     @property
     def celery_broker(self) -> str:

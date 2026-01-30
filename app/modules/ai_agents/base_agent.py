@@ -14,7 +14,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from enum import Enum
 
-from app.integrations.ai.factory import get_model_factory
+from app.infrastructure.ai_providers.factory import get_model_factory
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

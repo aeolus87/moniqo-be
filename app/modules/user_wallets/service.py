@@ -21,8 +21,8 @@ from app.modules.wallets.models import (
     UserWalletStatus,
     SyncStatus
 )
-from app.integrations.wallets.factory import get_wallet_factory
-from app.integrations.wallets.base import (
+from app.infrastructure.exchanges.factory import get_wallet_factory
+from app.infrastructure.exchanges.base import (
     BaseWallet,
     WalletConnectionError,
     AuthenticationError
@@ -263,7 +263,8 @@ async def create_user_wallet(
     wallet_provider_id: str,
     custom_name: str,
     credentials: Dict[str, str],
-    risk_limits: Optional[Dict[str, float]] = None
+    risk_limits: Optional[Dict[str, float]] = None,
+    use_testnet: bool = False
 ) -> Dict[str, Any]:
     """
     Create user wallet connection.
@@ -275,6 +276,7 @@ async def create_user_wallet(
         custom_name: User's custom name
         credentials: Plain credentials (will be encrypted)
         risk_limits: Risk limits (optional)
+        use_testnet: Use testnet/demo network (default False for mainnet)
         
     Returns:
         Created user wallet dict
@@ -291,7 +293,8 @@ async def create_user_wallet(
             credentials={
                 "api_key": "abc123",
                 "api_secret": "secret456"
-            }
+            },
+            use_testnet=False
         )
     """
     # Validate wallet provider exists
@@ -328,6 +331,7 @@ async def create_user_wallet(
         "wallet_provider_id": wallet_provider_id,
         "custom_name": custom_name,
         "is_active": True,
+        "use_testnet": use_testnet,
         "credentials": encrypted_credentials,
         "connection_status": UserWalletStatus.DISCONNECTED.value,
         "last_connection_test": None,

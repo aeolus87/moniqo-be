@@ -32,12 +32,12 @@ from app.modules.flows.models import (
 )
 from app.modules.positions.models import PositionStatus, PositionSide
 from app.modules.flows.schemas import FlowCreate, FlowUpdate
-from app.integrations.market_data import get_binance_client
-from app.integrations.wallets.base import OrderSide, OrderType, TimeInForce, OrderStatus
-from app.integrations.wallets.factory import create_wallet_from_db
-from app.services.indicators import calculate_all_indicators
-from app.services.risk_rules import evaluate_risk_limits
-from app.services.signal_aggregator import get_signal_aggregator
+from app.infrastructure.market_data import get_binance_client
+from app.infrastructure.exchanges.base import OrderSide, OrderType, TimeInForce, OrderStatus
+from app.infrastructure.exchanges.factory import create_wallet_from_db
+from app.modules.market.indicators import calculate_all_indicators
+from app.modules.risk_rules.risk_evaluator import evaluate_risk_limits
+from app.modules.market.signal_aggregator import get_signal_aggregator
 from app.modules.ai_agents.market_analyst_agent import MarketAnalystAgent
 from app.modules.ai_agents.risk_manager_agent import RiskManagerAgent
 from app.modules.risk_rules import service as risk_rule_service
@@ -51,6 +51,7 @@ from app.modules.flows.utils import (
     get_or_create_demo_user as _get_or_create_demo_user,
     resolve_order_quantity as _resolve_order_quantity,
     resolve_demo_force_action as _resolve_demo_force_action,
+    resolve_leverage as _resolve_leverage,
 )
 # Note: execution_service.py contains equivalent functions but we keep local
 # implementations here to maintain backward compatibility with existing imports
@@ -77,6 +78,7 @@ from app.modules.flows.orchestrator import (
 from app.modules.flows.trade_executor import (
     place_order_with_retry as _place_order_with_retry,
 )
+from app.core.context import TradingMode
 
 logger = get_logger(__name__)
 
@@ -163,7 +165,7 @@ async def _schedule_auto_loop_impl(
                 logger.info(f"Flow {flow.id} is not active (status: {refreshed.status}), stopping auto-loop")
                 return
             
-            await execute_flow(db, refreshed, model_provider, model_name)
+            await execute_flow(refreshed, model_provider, model_name)
         except Exception as e:
             logger.error(f"Auto-loop execution failed for flow {flow.id}: {e}")
             
@@ -178,10 +180,13 @@ async def _schedule_auto_loop_impl(
     try:
         from celery import current_task
         if current_task and current_task.request is not None:
-            from app.tasks.flow_tasks import execute_flow_task
+            from app.infrastructure.tasks.flow_tasks import execute_flow_task
+            
+            # Determine trading mode from flow
+            mode = await _determine_flow_mode(flow)
 
             execute_flow_task.apply_async(
-                args=[str(flow.id), model_provider, model_name],
+                args=[str(flow.id), model_provider, model_name, mode.value],
                 countdown=delay_seconds,
             )
             return
@@ -324,7 +329,7 @@ async def start_flow(
     
     # Trigger first execution cycle
     try:
-        await execute_flow(db, flow, model_provider, model_name)
+        await execute_flow(flow, model_provider, model_name)
     except Exception as e:
         logger.error(f"Failed to start first execution for flow {flow_id}: {e}")
         # Schedule retry even on failure
@@ -504,8 +509,67 @@ async def delete_all_executions(
 
 # ==================== FLOW EXECUTION ====================
 
+async def _determine_flow_mode(flow: Flow) -> TradingMode:
+    """
+    Determine trading mode from flow's wallet.
+    
+    Args:
+        flow: Flow instance
+        
+    Returns:
+        TradingMode: DEMO or REAL
+    """
+    from app.core.database import db_provider
+    from app.core.context import TradingMode
+    from bson import ObjectId
+    
+    execution_config = flow.config or {}
+    wallet_id_config = str(execution_config.get("user_wallet_id", ""))
+    
+    if not wallet_id_config:
+        return TradingMode.DEMO  # Default to demo for safety
+    
+    try:
+        # Use demo database to check wallet (wallets collection is shared)
+        db = db_provider.get_db_for_mode(TradingMode.DEMO)
+        
+        user_wallet = await db.user_wallets.find_one({
+            "_id": ObjectId(wallet_id_config),
+            "deleted_at": None
+        })
+        
+        if not user_wallet:
+            return TradingMode.DEMO  # Default to demo for safety
+        
+        # Check wallet definition
+        wallet_def_id = user_wallet.get("wallet_provider_id")
+        if not wallet_def_id:
+            return TradingMode.DEMO  # Default to demo for safety
+        
+        wallet_def = await db.wallets.find_one({
+            "_id": ObjectId(wallet_def_id),
+            "deleted_at": None
+        })
+        
+        if not wallet_def:
+            return TradingMode.DEMO  # Default to demo for safety
+        
+        # Determine if demo
+        is_demo = (
+            wallet_def.get("is_demo", False) or
+            wallet_def.get("integration_type") == "simulation" or
+            "demo" in wallet_def.get("slug", "").lower() or
+            user_wallet.get("use_testnet", False)
+        )
+        
+        return TradingMode.DEMO if is_demo else TradingMode.REAL
+        
+    except Exception as e:
+        logger.error(f"Error determining flow mode: {e}")
+        return TradingMode.DEMO  # Default to demo for safety
+
+
 async def execute_flow(
-    db: AsyncIOMotorDatabase,
     flow: Flow,
     model_provider: str = "groq",
     model_name: Optional[str] = None,
@@ -519,7 +583,20 @@ async def execute_flow(
     3. Run MarketAnalystAgent
     4. Run RiskManagerAgent
     5. Make final decision
+    
+    Uses DatabaseProvider to automatically route to correct database (real/demo)
+    based on flow's wallet configuration.
     """
+    from app.core.database import db_provider
+    from app.core.context import set_trading_mode
+    
+    # Determine trading mode from flow's wallet
+    mode = await _determine_flow_mode(flow)
+    set_trading_mode(mode)
+    
+    # Get database instance for current mode
+    db = db_provider.get_db()
+    
     # EXECUTION SAFEGUARD #0: Refresh flow from database and check status
     # Refresh to ensure we have the latest status (flow object might be stale)
     if flow.id:
@@ -573,6 +650,107 @@ async def execute_flow(
     
     logger.info(f"Acquired execution lock for flow {flow.id} (execution {execution.id})")
 
+    execution_config = flow.config or {}
+    # Default to True - bypass gates to ensure AI decisions result in actual trades
+    demo_force_position = bool(execution_config.get("demo_force_position", True))
+    
+    # ==================== SAFETY GATES (Real Mode Only) ====================
+    # Check if this is a real trading flow (not demo)
+    is_demo_flow = demo_force_position
+    user_id_config = str(execution_config.get("user_id", ""))
+    wallet_id_config = str(execution_config.get("user_wallet_id", ""))
+    
+    # Check wallet to determine if demo
+    if wallet_id_config:
+        user_wallet = await db.user_wallets.find_one({"_id": ObjectId(wallet_id_config)})
+        if user_wallet:
+            wallet_def_id = user_wallet.get("wallet_provider_id")
+            if wallet_def_id:
+                wallet_def = await db.wallets.find_one({"_id": ObjectId(wallet_def_id)})
+                if wallet_def:
+                    is_demo_flow = (
+                        wallet_def.get("is_demo", False) or
+                        wallet_def.get("integration_type") == "simulation" or
+                        "demo" in wallet_def.get("slug", "").lower()
+                    )
+    
+    # Run safety gates for non-demo (real) flows
+    if not is_demo_flow and user_id_config and wallet_id_config:
+        from datetime import datetime, timezone as tz
+        from bson import ObjectId
+        
+        # Gate 1: Emergency Stop Check
+        safety_status = await db.safety_status.find_one({
+            "user_id": ObjectId(user_id_config),
+            "wallet_id": ObjectId(wallet_id_config)
+        })
+        
+        if safety_status and safety_status.get("emergency_stop", False):
+            logger.warning(f"Safety gate blocked: Emergency stop active for user={user_id_config}")
+            await update_execution(db, execution.id, {
+                "status": ExecutionStatus.FAILED.value,
+                "completed_at": datetime.now(tz.utc),
+                "duration": 0,
+                "error": "Execution blocked: Emergency stop is active. Reset emergency stop to resume trading."
+            })
+            await release_execution_lock(db, flow.id, str(execution.id))
+            return execution
+        
+        if safety_status:
+            now = datetime.now(tz.utc)
+            
+            # Gate 2: Circuit Breaker Check
+            if safety_status.get("circuit_breaker_tripped", False):
+                cooldown_until = safety_status.get("circuit_breaker_until")
+                if cooldown_until and cooldown_until > now:
+                    reason = safety_status.get("circuit_breaker_reason", "Circuit breaker tripped")
+                    logger.warning(f"Safety gate blocked: Circuit breaker active for user={user_id_config}, reason={reason}")
+                    await update_execution(db, execution.id, {
+                        "status": ExecutionStatus.FAILED.value,
+                        "completed_at": datetime.now(tz.utc),
+                        "duration": 0,
+                        "error": f"Execution blocked: {reason}. Wait for cooldown or reset manually."
+                    })
+                    await release_execution_lock(db, flow.id, str(execution.id))
+                    return execution
+            
+            # Gate 3: Cooldown Check
+            cooldown_until = safety_status.get("cooldown_until")
+            if cooldown_until and cooldown_until > now:
+                remaining = int((cooldown_until - now).total_seconds())
+                reason = safety_status.get("cooldown_reason", "Cooldown active")
+                logger.warning(f"Safety gate blocked: Cooldown active for user={user_id_config}, remaining={remaining}s")
+                await update_execution(db, execution.id, {
+                    "status": ExecutionStatus.FAILED.value,
+                    "completed_at": datetime.now(tz.utc),
+                    "duration": 0,
+                    "error": f"Execution blocked: {reason}. {remaining} seconds remaining."
+                })
+                await release_execution_lock(db, flow.id, str(execution.id))
+                return execution
+            
+            # Gate 4: Daily Loss Limit Check
+            daily_pnl = safety_status.get("daily_pnl", 0.0)
+            daily_loss_limit = 100.0  # Default $100 daily loss limit
+            current_loss = abs(min(0, daily_pnl))
+            if current_loss >= daily_loss_limit:
+                logger.warning(f"Safety gate blocked: Daily loss limit exceeded for user={user_id_config}, loss=${current_loss:.2f}")
+                await update_execution(db, execution.id, {
+                    "status": ExecutionStatus.FAILED.value,
+                    "completed_at": datetime.now(tz.utc),
+                    "duration": 0,
+                    "error": f"Execution blocked: Daily loss limit (${daily_loss_limit}) exceeded. Current loss: ${current_loss:.2f}. Wait until tomorrow."
+                })
+                await release_execution_lock(db, flow.id, str(execution.id))
+                return execution
+        
+        logger.info(f"Safety gates passed for flow {flow.id} (real mode)")
+    elif not is_demo_flow:
+        logger.debug(f"Safety gates skipped: missing user_id or wallet_id config")
+    else:
+        logger.debug(f"Safety gates skipped: demo mode flow")
+    # ==================== END SAFETY GATES ====================
+
     # Set to RUNNING status
     await update_execution(db, execution.id, {
         "status": ExecutionStatus.RUNNING.value,
@@ -580,9 +758,6 @@ async def execute_flow(
     })
 
     logger.info(f"Idempotency check passed - execution {execution.id} is now running for flow {flow.id}")
-    execution_config = flow.config or {}
-    # Default to True - bypass gates to ensure AI decisions result in actual trades
-    demo_force_position = bool(execution_config.get("demo_force_position", True))
     
     # Step indices
     STEP_DATA_FETCH = 0
@@ -645,7 +820,7 @@ async def execute_flow(
         # Fetch Polymarket odds for BTC Price Up markets (with 15-min cache)
         polymarket_data = None
         try:
-            from app.integrations.market_data.polymarket_client import get_polymarket_client
+            from app.infrastructure.market_data.polymarket_market_data_client import get_polymarket_client
             base_symbol = flow.symbol.split("/")[0] if "/" in flow.symbol else flow.symbol
             if base_symbol.upper() == "BTC":
                 # Check cache first
@@ -679,7 +854,7 @@ async def execute_flow(
         # Fetch Reddit sentiment for symbol (with 15-min cache)
         reddit_sentiment = None
         try:
-            from app.integrations.market_data.reddit_client import get_reddit_client
+            from app.infrastructure.market_data.reddit_market_data_client import get_reddit_client
             base_symbol = flow.symbol.split("/")[0] if "/" in flow.symbol else flow.symbol
             cache_key = f"reddit:{base_symbol.upper()}"
             
@@ -1430,6 +1605,21 @@ async def execute_flow(
                 base_balance = await wallet.get_balance(base_asset) if base_asset else None
                 quote_balance = await wallet.get_balance(quote_asset) if quote_asset else None
                 logger.info(f"Wallet balances - Base ({base_asset}): {base_balance}, Quote ({quote_asset}): {quote_balance}")
+                
+                # Get wallet capabilities for leverage resolution
+                wallet_capabilities = {}
+                try:
+                    from bson import ObjectId
+                    wallet_def = await db.wallets.find_one({"_id": ObjectId(wallet.wallet_id)})
+                    if wallet_def:
+                        wallet_capabilities = {
+                            "max_leverage": wallet_def.get("max_leverage", 20),
+                            "supports_futures": wallet_def.get("supports_futures", False),
+                            "supports_perpetuals": wallet_def.get("supports_perpetuals", False),
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed to fetch wallet capabilities: {e}")
+                    wallet_capabilities = {"max_leverage": 20}  # Default
 
             order_type_value = execution_config.get("order_type", "market")
             time_in_force_value = execution_config.get("time_in_force", "GTC")
@@ -1564,6 +1754,14 @@ async def execute_flow(
                 else:
                     logger.warning("Could not fetch fresh price for staleness check")
 
+            # Resolve leverage from config (for both simulated and real trades)
+            leverage = _resolve_leverage(
+                execution_config=execution_config,
+                wallet_capabilities=wallet_capabilities if not is_simulated else {},
+                default_leverage=1
+            )
+            logger.info(f"Resolved leverage: {leverage}x for {flow.symbol}")
+            
             # Place real order or simulate
             if is_simulated:
                 # Simulated order - no actual exchange interaction
@@ -1594,6 +1792,7 @@ async def execute_flow(
                     time_in_force=time_in_force,
                     max_retries=max_retries,
                     retry_delay_seconds=retry_delay_seconds,
+                    leverage=leverage,
                 )
 
                 if not order_result.get("success", True):
@@ -1808,8 +2007,8 @@ async def execute_flow(
                         "price": float(entry_price),
                         "amount": float(position_quantity),
                         "value": float(entry_value),
-                        "leverage": 1,
-                        "margin_used": float(entry_value),
+                        "leverage": leverage if not is_simulated else 1,
+                        "margin_used": float(entry_value / leverage) if leverage > 1 and not is_simulated else float(entry_value),
                         "fees": float(order_record.get("total_fees", 0)),
                         "fee_currency": order_result.get("fee_currency", "USDT"),
                         "ai_reasoning": final_reasoning,
@@ -1851,14 +2050,30 @@ async def execute_flow(
                     
                     # Try to enqueue position monitoring task (optional - requires celery)
                     try:
-                        from app.tasks.order_tasks import monitor_position_task
-                        monitor_position_task.delay(position_record["_id"])
-                        logger.debug(f"Position monitor task enqueued for {position_record['_id']}")
+                        from app.infrastructure.tasks.order_tasks import monitor_position_task
+                        # Get trading mode from current context (set earlier in execute_flow)
+                        from app.core.context import get_trading_mode
+                        trading_mode = get_trading_mode()
+                        monitor_position_task.delay(position_record["_id"], trading_mode.value)
+                        logger.debug(f"Position monitor task enqueued for {position_record['_id']} (mode: {trading_mode.value})")
                     except ImportError:
                         # Celery not installed - monitoring will happen via other means
                         logger.debug("Celery not available - position monitoring will use alternative methods")
                     except Exception as e:
                         logger.warning(f"Failed to enqueue position monitor task: {e}")
+                    
+                    # ==================== POST-TRADE SAFETY TRACKING ====================
+                    # Start minimum cooldown after trade (real mode only)
+                    if not is_simulated and user_id and wallet_id:
+                        try:
+                            from app.modules.risk_rules.cooldown import get_cooldown_service
+                            cooldown_svc = get_cooldown_service(db)
+                            await cooldown_svc.start_trade_cooldown(str(user_id), str(wallet_id))
+                            logger.debug(f"Post-trade cooldown started for user={user_id}, wallet={wallet_id}")
+                        except Exception as cooldown_err:
+                            logger.warning(f"Failed to start post-trade cooldown: {cooldown_err}")
+                    # ==================== END POST-TRADE SAFETY TRACKING ====================
+                    
                 except Exception as e:
                     logger.error(f"CRITICAL: Failed to create position record: {e}")
                     logger.error(f"Position data: {position_record}")

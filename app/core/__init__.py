@@ -27,7 +27,7 @@ from app.core.responses import (
     error_response,
     paginated_response,
 )
-from app.core.exceptions import (
+from app.shared.exceptions import (
     AppException,
     AuthenticationError,
     InvalidCredentialsError,

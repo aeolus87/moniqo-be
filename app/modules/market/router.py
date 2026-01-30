@@ -12,7 +12,7 @@ from typing import List, Optional
 import asyncio
 from fastapi import APIRouter, HTTPException, Query
 
-from app.integrations.market_data import (
+from app.infrastructure.market_data import (
     get_binance_client,
     get_coinlore_client,
 )
@@ -29,9 +29,9 @@ from app.modules.market.schemas import (
     MarketDataResponse,
     MarketHealthResponse,
 )
-from app.services.indicators import calculate_all_indicators
-from app.services.market_health import compute_market_health
-from app.services.signal_aggregator import get_signal_aggregator
+from app.modules.market.indicators import calculate_all_indicators
+from app.modules.market.market_health import compute_market_health
+from app.modules.market.signal_aggregator import get_signal_aggregator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

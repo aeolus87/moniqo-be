@@ -7,9 +7,9 @@ API endpoints for authentication operations.
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.core.responses import success_response, error_response
-from app.core.exceptions import (
+from app.shared.exceptions import (
     DuplicateEmailError,
     InvalidCredentialsError,
     UnverifiedEmailError,
@@ -53,7 +53,7 @@ def error_json_response(status_code: int, message: str, error_code: str, error_m
 )
 async def register(
     user_data: RegisterRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Register a new user.
@@ -103,7 +103,7 @@ async def register(
 )
 async def login(
     login_data: LoginRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Authenticate user and return tokens.
@@ -168,7 +168,7 @@ async def login(
 )
 async def refresh_token(
     refresh_data: RefreshTokenRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Refresh access token.
@@ -225,7 +225,7 @@ async def refresh_token(
 )
 async def verify_email(
     token: str = Query(..., description="Email verification token"),
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Verify user email.
@@ -290,7 +290,7 @@ async def verify_email(
 )
 async def forgot_password(
     reset_request: ForgotPasswordRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Request password reset.
@@ -342,7 +342,7 @@ async def forgot_password(
 )
 async def reset_password(
     reset_data: ResetPasswordRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db())
 ):
     """
     Reset password.

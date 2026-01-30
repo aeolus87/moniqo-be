@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.config.database import get_database
+from app.core.database import db_provider
 from app.modules.risk_rules.schemas import (
     RiskRuleCreate,
     RiskRuleUpdate,
@@ -20,7 +20,7 @@ from app.modules.risk_rules.schemas import (
     RiskRuleListResponse,
 )
 from app.modules.risk_rules import service as risk_rule_service
-from app.services.risk_rules import evaluate_risk_limits
+from app.modules.risk_rules.risk_evaluator import evaluate_risk_limits
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,7 +52,7 @@ def rule_to_response(rule) -> RiskRuleResponse:
 )
 async def create_risk_rule(
     data: RiskRuleCreate,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Create a new risk rule"""
     try:
@@ -75,7 +75,7 @@ async def list_risk_rules(
     user_id: Optional[str] = Query(None, description="Filter by user id"),
     wallet_id: Optional[str] = Query(None, description="Filter by wallet id"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """List risk rules"""
     try:
@@ -107,7 +107,7 @@ async def list_risk_rules(
 )
 async def get_risk_rule(
     rule_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Get risk rule"""
     rule = await risk_rule_service.get_risk_rule_by_id(db, rule_id)
@@ -133,7 +133,7 @@ async def validate_risk_rules(
     open_positions: int = 0,
     daily_loss_usd: float = 0.0,
     portfolio_utilization_percent: float = 0.0,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Validate a proposed trade against risk limits"""
     try:
@@ -191,7 +191,7 @@ async def validate_risk_rules(
 async def update_risk_rule(
     rule_id: str,
     updates: RiskRuleUpdate,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Update risk rule"""
     existing = await risk_rule_service.get_risk_rule_by_id(db, rule_id)
@@ -217,7 +217,7 @@ async def update_risk_rule(
 )
 async def delete_risk_rule(
     rule_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database),
+    db: AsyncIOMotorDatabase = Depends(lambda: db_provider.get_db()),
 ):
     """Delete risk rule"""
     existing = await risk_rule_service.get_risk_rule_by_id(db, rule_id)

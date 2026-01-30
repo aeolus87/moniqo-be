@@ -37,7 +37,6 @@ from app.integrations.wallets.base import (
     OrderNotFoundError,
     SymbolNotSupportedError
 )
-from app.config.database import get_database
 from app.utils.logger import get_logger
 from app.integrations.market_data.binance_client import get_binance_client
 
@@ -108,9 +107,12 @@ class DemoWallet(BaseWallet):
         self._state_loaded = False
     
     async def _ensure_db(self):
-        """Ensure database connection"""
+        """Ensure database connection - always uses demo database"""
         if self.db is None:
-            self.db = get_database()
+            from app.core.database import db_provider
+            from app.core.context import TradingMode
+            # Explicitly use demo database (wallet factory ensures this is only called in DEMO mode)
+            self.db = db_provider.get_db_for_mode(TradingMode.DEMO)
     
     async def _load_state(self) -> Dict[str, Any]:
         """

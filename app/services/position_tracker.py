@@ -13,13 +13,14 @@ from decimal import Decimal, ROUND_DOWN
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
-from app.modules.positions.models import Position, PositionStatus, PositionSide, PositionUpdate
+from app.domain.models.position import Position, PositionStatus, PositionSide
+from app.modules.positions.repository import PositionRepository
 from app.modules.flows.models import FlowStatus
-from app.integrations.wallets.base import OrderSide, OrderType, TimeInForce
-from app.integrations.wallets.factory import create_wallet_from_db
+from app.infrastructure.exchanges.base import OrderSide, OrderType, TimeInForce
+from app.infrastructure.exchanges.factory import create_wallet_from_db
 from app.modules.ai_agents.monitor_agent import MonitorAgent
-from app.services.signal_aggregator import get_signal_aggregator
-from app.integrations.market_data.binance_client import BinanceClient
+from app.modules.market.signal_aggregator import get_signal_aggregator
+from app.infrastructure.market_data.binance_client import BinanceClient
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -60,6 +61,7 @@ class PositionTrackerService:
             db: MongoDB database instance
         """
         self.db = db
+        self.repository = PositionRepository()
         self.signal_aggregator = get_signal_aggregator()
         
         logger.info("Position tracker service initialized")
@@ -82,6 +84,26 @@ class PositionTrackerService:
             # On error, allow monitoring (fail open)
             return True
     
+    async def _insert_position_update(
+        self,
+        position_id: str,
+        price: Decimal,
+        unrealized_pnl: Decimal,
+        unrealized_pnl_percent: Decimal
+    ) -> None:
+        """Insert position update log entry."""
+        try:
+            await self.db["position_updates"].insert_one({
+                "position_id": ObjectId(position_id),
+                "price": float(price),
+                "unrealized_pnl": float(unrealized_pnl),
+                "unrealized_pnl_percent": float(unrealized_pnl_percent),
+                "timestamp": datetime.now(timezone.utc),
+                "actions_triggered": []
+            })
+        except Exception as e:
+            logger.debug(f"Failed to insert position update log: {e}")
+    
     async def update_position_price(
         self,
         position_id: str,
@@ -98,8 +120,8 @@ class PositionTrackerService:
             Dict with update result
         """
         try:
-            # Get position
-            position = await Position.get(position_id)
+            # Get position using repository
+            position = await self.repository.find_by_id(position_id)
             
             if not position:
                 return {
@@ -123,17 +145,19 @@ class PositionTrackerService:
                         "skipped": True
                     }
             
-            # Update price
-            await position.update_price(current_price)
+            # Update price (domain logic)
+            position.update_price(current_price)
             
-            # Create position update log
-            update = PositionUpdate(
-                position_id=position.id,
+            # Create position update log (direct DB insert for logging)
+            await self._insert_position_update(
+                position_id=str(position.id),
                 price=current_price,
-                unrealized_pnl=position.current["unrealized_pnl"],
-                unrealized_pnl_percent=position.current["unrealized_pnl_percent"]
+                unrealized_pnl=Decimal(str(position.current["unrealized_pnl"])),
+                unrealized_pnl_percent=Decimal(str(position.current["unrealized_pnl_percent"]))
             )
-            await update.insert()
+            
+            # Save position via repository
+            position = await self.repository.save(position)
             
             # Check stop loss/take profit
             await self.check_stop_loss_take_profit(position)
@@ -191,23 +215,8 @@ class PositionTrackerService:
             Dict with monitoring result
         """
         try:
-            try:
-                position = await Position.get(position_id)
-            except Exception as e:
-                error_str = str(e).lower()
-                # Don't log warnings for expected errors:
-                # - "not found" / "does not exist" - positions get deleted regularly
-                # - Schema validation errors (e.g., missing user_id) - handled via raw MongoDB fallback
-                if "not found" not in error_str and "does not exist" not in error_str:
-                    # Check if position exists but has schema mismatch (e.g., None user_id)
-                    doc_check = await self.db["positions"].find_one({"_id": ObjectId(position_id)})
-                    if doc_check:
-                        # Position exists but Beanie can't load it - schema mismatch, use debug level
-                        logger.debug(f"Beanie schema mismatch for position {position_id}, using raw MongoDB fallback")
-                    else:
-                        # Position truly doesn't exist
-                        logger.debug(f"Position {position_id} not found in database")
-                position = None
+            # Get position using repository
+            position = await self.repository.find_by_id(position_id)
 
             if not position:
                 doc = await self.db["positions"].find_one({"_id": ObjectId(position_id), "deleted_at": None})
@@ -479,14 +488,14 @@ class PositionTrackerService:
                     "timestamp": datetime.now(timezone.utc),
                     "result": monitor_result,
                 }
-                await position.save()
+                await self.repository.save(position)
 
                 await self._apply_ai_recommendations(position, monitor_result)
 
                 for rec in monitor_result.get("recommendations", []):
                     if rec.get("position_id") == str(position.id) and rec.get("action") in ["close", "exit"]:
                         # Refresh position from database to avoid race conditions
-                        refreshed_position = await Position.get(str(position.id))
+                        refreshed_position = await self.repository.find_by_id(str(position.id))
                         if not refreshed_position or not refreshed_position.is_open():
                             logger.debug(f"Position {position.id} is no longer open, skipping AI close recommendation")
                             break
@@ -522,22 +531,9 @@ class PositionTrackerService:
             Dict with monitoring results
         """
         try:
-            position_ids: List[str] = []
-            try:
-                positions = await Position.find(
-                    Position.status == PositionStatus.OPEN,
-                    Position.deleted_at == None
-                ).to_list()
-                position_ids = [str(position.id) for position in positions]
-            except Exception as e:
-                # Use debug level - fallback to raw MongoDB works fine
-                logger.debug(f"Beanie query failed, using raw MongoDB fallback: {e}")
-                cursor = self.db["positions"].find({
-                    "status": PositionStatus.OPEN.value,
-                    "deleted_at": None,
-                })
-                docs = await cursor.to_list(length=None)
-                position_ids = [str(doc.get("_id")) for doc in docs if doc.get("_id")]
+            # Get all open positions using repository
+            positions = await self.repository.find_open_positions_all()
+            position_ids = [str(position.id) for position in positions]
             
             results = {
                 "success": True,
@@ -703,7 +699,7 @@ class PositionTrackerService:
         """Trigger stop loss for position"""
         try:
             # Refresh position from database to avoid race conditions
-            refreshed_position = await Position.get(str(position.id))
+            refreshed_position = await self.repository.find_by_id(str(position.id))
             if not refreshed_position or not refreshed_position.is_open():
                 logger.debug(f"Position {position.id} is no longer open, skipping stop loss trigger")
                 return
@@ -730,7 +726,7 @@ class PositionTrackerService:
         """Trigger take profit for position"""
         try:
             # Refresh position from database to avoid race conditions
-            refreshed_position = await Position.get(str(position.id))
+            refreshed_position = await self.repository.find_by_id(str(position.id))
             if not refreshed_position or not refreshed_position.is_open():
                 logger.debug(f"Position {position.id} is no longer open, skipping take profit trigger")
                 return
@@ -786,7 +782,7 @@ class PositionTrackerService:
                         )
                         position.risk_management["trailing_stop"]["last_adjusted"] = datetime.now(timezone.utc)
                         
-                        await position.save()
+                        await self.repository.save(position)
             
             else:  # SHORT
                 if current_price <= activation_price:
@@ -807,7 +803,7 @@ class PositionTrackerService:
                         )
                         position.risk_management["trailing_stop"]["last_adjusted"] = datetime.now(timezone.utc)
                         
-                        await position.save()
+                        await self.repository.save(position)
         
         except Exception as e:
             logger.error(f"Error updating trailing stop: {str(e)}")
@@ -839,7 +835,7 @@ class PositionTrackerService:
                 position.risk_management["break_even"]["activated"] = True
                 position.risk_management["break_even"]["activated_at"] = datetime.now(timezone.utc)
                 
-                await position.save()
+                await self.repository.save(position)
                 
                 logger.info(f"Break-even stop loss activated for position {position.id}")
         
@@ -917,12 +913,13 @@ class PositionTrackerService:
             )
             
             # Close position without placing order - dust amount too small to trade
-            await position.close(
-                order_id=position.id,
+            position.close(
+                order_id=str(position.id),
                 price=current_price,
                 reason=f"{reason} (dust below minimum)",
                 fees=Decimal("0"),
             )
+            await self.repository.save(position)
             
             await self._record_transaction(
                 position=position,
@@ -975,13 +972,14 @@ class PositionTrackerService:
         fee_currency = order_result.get("fee_currency", "USDT")
 
         exit_order_id = order_result.get("order_id") or str(position.id)
-        await position.close(
+        position.close(
             order_id=exit_order_id,
             price=exit_price,
             reason=reason,
             fees=fee,
             fee_currency=fee_currency,
         )
+        await self.repository.save(position)
 
         await self._record_transaction(
             position=position,
@@ -1041,7 +1039,7 @@ class PositionTrackerService:
                 updated = True
 
         if updated:
-            await position.save()
+            await self.repository.save(position)
 
     async def _record_transaction(
         self,
@@ -1112,6 +1110,7 @@ class PositionTrackerService:
             exit_data = position.exit or {}
             pnl = float(exit_data.get("realized_pnl", 0))
             pnl_percent = float(exit_data.get("realized_pnl_percent", 0))
+            is_win = pnl > 0
             
             learning_record = {
                 "user_id": position.user_id,
@@ -1136,6 +1135,60 @@ class PositionTrackerService:
             
             await self.db["learning_outcomes"].insert_one(learning_record)
             logger.info(f"Recorded learning outcome for position {position.id}: {reason} - PnL: {pnl:.2f}")
+            
+            # ==================== SAFETY TRACKING ON POSITION CLOSE ====================
+            # Update circuit breaker and daily loss tracker for non-simulated positions
+            if position.user_id and position.user_wallet_id and not position.simulated:
+                try:
+                    user_id = str(position.user_id)
+                    wallet_id = str(position.user_wallet_id)
+                    
+                    # 1. Update circuit breaker (tracks consecutive losses)
+                    from app.modules.risk_rules.circuit_breaker import get_circuit_breaker_service
+                    circuit_breaker = get_circuit_breaker_service(self.db)
+                    cb_result = await circuit_breaker.record_trade_result(
+                        user_id=user_id,
+                        wallet_id=wallet_id,
+                        is_win=is_win,
+                        pnl=pnl
+                    )
+                    
+                    if cb_result.get("tripped"):
+                        logger.warning(
+                            f"Circuit breaker tripped for user={user_id}: {cb_result.get('reason')}"
+                        )
+                    
+                    # 2. Update daily loss tracker
+                    from app.modules.risk_rules.daily_loss_tracker import get_daily_loss_tracker
+                    daily_tracker = get_daily_loss_tracker(self.db)
+                    await daily_tracker.record_trade(
+                        user_id=user_id,
+                        wallet_id=wallet_id,
+                        pnl=pnl,
+                        is_win=is_win
+                    )
+                    
+                    # 3. Start loss cooldown if trade was a loss
+                    if not is_win:
+                        from app.modules.risk_rules.cooldown import get_cooldown_service
+                        cooldown_svc = get_cooldown_service(self.db)
+                        consecutive_losses = cb_result.get("consecutive_losses", 1)
+                        await cooldown_svc.start_loss_cooldown(
+                            user_id=user_id,
+                            wallet_id=wallet_id,
+                            consecutive_losses=consecutive_losses
+                        )
+                        logger.info(
+                            f"Loss cooldown started for user={user_id}, "
+                            f"consecutive_losses={consecutive_losses}"
+                        )
+                    
+                    logger.debug(f"Safety tracking updated for position {position.id}")
+                    
+                except Exception as safety_err:
+                    logger.warning(f"Failed to update safety tracking: {safety_err}")
+            # ==================== END SAFETY TRACKING ====================
+            
         except Exception as e:
             logger.error(f"Failed to record learning outcome for position {position.id}: {e}")
 

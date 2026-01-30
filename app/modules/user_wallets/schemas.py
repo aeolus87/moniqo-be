@@ -54,6 +54,10 @@ class CreateUserWalletRequest(BaseModel):
         None,
         description="Risk limits (optional)"
     )
+    use_testnet: bool = Field(
+        default=False,
+        description="Use testnet/demo network (True for demo mode, False for mainnet/real mode)"
+    )
     
     @validator("custom_name")
     def validate_custom_name(cls, v):
@@ -75,7 +79,8 @@ class CreateUserWalletRequest(BaseModel):
                     "max_position_size_usd": 1000.0,
                     "daily_loss_limit": 100.0,
                     "stop_loss_default_percent": 0.02
-                }
+                },
+                "use_testnet": False
             }
         }
 
@@ -86,6 +91,7 @@ class UpdateUserWalletRequest(BaseModel):
     credentials: Optional[Dict[str, str]] = Field(None, description="Updated credentials")
     is_active: Optional[bool] = Field(None)
     risk_limits: Optional[Dict[str, float]] = Field(None)
+    use_testnet: Optional[bool] = Field(None, description="Use testnet/demo network")
 
 
 class UserWalletResponse(BaseModel):
@@ -96,6 +102,7 @@ class UserWalletResponse(BaseModel):
     wallet_provider_name: Optional[str] = Field(None, description="Provider name (populated)")
     custom_name: str
     is_active: bool
+    use_testnet: bool = Field(default=False, description="Uses testnet/demo network")
     connection_status: str
     last_connection_test: Optional[datetime]
     last_connection_error: Optional[str]
@@ -120,6 +127,7 @@ class UserWalletResponse(BaseModel):
                 "wallet_provider_name": "Binance",
                 "custom_name": "My Binance Main",
                 "is_active": True,
+                "use_testnet": False,
                 "connection_status": "connected",
                 "last_connection_test": "2025-11-22T10:30:00Z",
                 "last_connection_error": None,
